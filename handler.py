@@ -1,0 +1,121 @@
+import runpod
+import os
+import torch
+import requests
+import uuid
+from PIL import Image
+from diffusers import ZImagePipeline
+from s3_utils import upload_image_to_s3
+
+# Environment Variables
+MODEL_ID = os.environ.get("MODEL_ID", "Tongyi-MAI/Z-Image")
+MODEL_DIR = "/runpod-volume/zimage-diffusion/models" # Runpod volume location
+OUTPUT_DIR = "/tmp/outputs"
+
+# Ensure output directory exists
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Global model cache to avoid re-loading across jobs in the same session
+pipe = None
+
+def get_pipeline():
+    global pipe
+    if pipe is None:
+        print(f"Loading model: {MODEL_ID}")
+        # Note: MODEL_ID can be a repo name or a path on the network volume
+        pipe = ZImagePipeline.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+        )
+        pipe.to("cuda")
+        print("Model loaded successfully.")
+    return pipe
+
+def download_lora(url):
+    """
+    Downloads LoRA to ephemeral storage (/tmp).
+    """
+    local_path = f"/tmp/{uuid.uuid4()}.safetensors"
+    print(f"Downloading LoRA from {url} to {local_path}")
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+    with open(local_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+    return local_path
+
+def handler(job):
+    """
+    The main RunPod serverless handler.
+    """
+    try:
+        job_input = job.get("input", {})
+
+        # 1. Parse Input with Defaults
+        prompt = job_input.get("prompt")
+        if not prompt:
+            return {"error": "Missing 'prompt' in input."}
+
+        lora_url = job_input.get("lora_url")
+        negative_prompt = job_input.get("negative_prompt", "")
+        width = job_input.get("width", 1024)
+        height = job_input.get("height", 1024)
+        steps = job_input.get("steps", 30)
+        guidance_scale = job_input.get("guidance_scale", 4.0)
+        seed = job_input.get("seed", 42)
+        lora_scale = job_input.get("lora_scale", 1.0)
+        adapter_name = job_input.get("adapter_name", "subject")
+
+        # 2. Setup Pipeline
+        pipeline = get_pipeline()
+
+        # 3. Handle LoRA
+        lora_path = None
+        if lora_url:
+            lora_path = download_lora(lora_url)
+            print(f"Loading LoRA from {lora_path}")
+            pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
+            pipeline.set_adapters([adapter_name], adapter_weights=[lora_scale])
+        else:
+            # If no LoRA, ensure no adapters are active
+            pipeline.unload_lora_weights()
+
+        # 4. Generate Image
+        generator = torch.Generator("cuda").manual_seed(seed)
+        print(f"Generating image: prompt='{prompt}', size={width}x{height}, seed={seed}")
+        
+        result = pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt if negative_prompt else None,
+            height=height,
+            width=width,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+        ).images[0]
+
+        # 5. Save as High-Quality JPG
+        output_filename = f"{uuid.uuid4()}.jpg"
+        output_path = os.path.join(OUTPUT_DIR, output_filename)
+        result.save(output_path, format="JPEG", quality=95)
+        print(f"Image saved to {output_path}")
+
+        # 6. Upload to S3
+        s3_url = upload_image_to_s3(output_path, output_filename)
+        print(f"Image uploaded to S3: {s3_url}")
+
+        # 7. Cleanup (Ephemeral Storage)
+        if lora_path and os.path.exists(lora_path):
+            os.remove(lora_path)
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+        return {"image_url": s3_url}
+
+    except Exception as e:
+        print(f"Error in handler: {str(e)}")
+        return {"error": str(e)}
+
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})

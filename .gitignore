@@ -1,0 +1,26 @@
+# Gemini/Serena internal files
+.serena/
+
+# Original inference script (not used in serverless)
+zimage_inference.py
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# RunPod/Local testing artifacts
+*.png
+*.jpg
+*.jpeg
+*.safetensors
+/tmp/outputs/
