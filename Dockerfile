@@ -17,6 +17,7 @@ RUN chmod +x runpod_bootstrap.sh
 
 # Environment variables (Can be overridden in RunPod)
 ENV MODEL_ID="Tongyi-MAI/Z-Image"
+ENV HF_TOKEN=""
 ENV PYTHONUNBUFFERED=1
 
 # Start the bootstrap script

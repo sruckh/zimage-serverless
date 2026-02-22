@@ -21,6 +21,12 @@ Configure these variables in your RunPod Endpoint/Template:
 | `S3_BUCKET_NAME` | **Required.** Name of the bucket to upload images to | - |
 | `S3_BASE_URL` | Optional. Base URL for the returned link. Defaults to `endpoint/bucket` | - |
 | `MODEL_ID` | HuggingFace Repo ID or local path | `Tongyi-MAI/Z-Image` |
+| `HF_TOKEN` | Optional. Hugging Face token for private models. | - |
+
+## Monitoring & Debugging
+
+On the first cold start, you can monitor the installation progress in the **RunPod logs** or by checking the persistent log file:
+`/runpod-volume/zimage-diffusion/bootstrap.log`
 
 ## Endpoint Input Parameters
 

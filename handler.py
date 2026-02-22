@@ -21,12 +21,14 @@ pipe = None
 def get_pipeline():
     global pipe
     if pipe is None:
+        hf_token = os.environ.get("HF_TOKEN")
         print(f"Loading model: {MODEL_ID}")
         # Note: MODEL_ID can be a repo name or a path on the network volume
         pipe = ZImagePipeline.from_pretrained(
             MODEL_ID,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
+            token=hf_token if hf_token else None
         )
         pipe.to("cuda")
         print("Model loaded successfully.")
