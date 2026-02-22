@@ -67,25 +67,33 @@ def handler(job):
         guidance_scale = job_input.get("guidance_scale", 4.0)
         seed = job_input.get("seed", 42)
         lora_scale = job_input.get("lora_scale", 1.0)
-        adapter_name = job_input.get("adapter_name", "subject")
+        
+        # Generate a unique adapter name for this request to avoid PEFT collisions
+        request_id = str(uuid.uuid4())[:8]
+        adapter_name = job_input.get("adapter_name", f"adapter_{request_id}")
 
         # 2. Setup Pipeline
         pipeline = get_pipeline()
+        
+        # Enable VAE tiling for better quality and memory efficiency
+        pipeline.vae.enable_tiling()
 
-        # 3. Handle LoRA
+        # 3. Handle LoRA - Clean start every time
+        # CRITICAL: Always unload previous LoRAs to prevent stacking/corruption in a persistent worker
+        print("Unloading any existing LoRA weights...")
+        pipeline.unload_lora_weights()
+        
         lora_path = None
         if lora_url:
             lora_path = download_lora(lora_url)
-            print(f"Loading LoRA from {lora_path}")
+            print(f"Loading LoRA from {lora_path} with scale {lora_scale}")
             pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
             pipeline.set_adapters([adapter_name], adapter_weights=[lora_scale])
-        else:
-            # If no LoRA, ensure no adapters are active
-            pipeline.unload_lora_weights()
+            print(f"LoRA '{adapter_name}' loaded successfully.")
 
         # 4. Generate Image
         generator = torch.Generator("cuda").manual_seed(seed)
-        print(f"Generating image: prompt='{prompt}', size={width}x{height}, seed={seed}")
+        print(f"Generating image: prompt='{prompt}', size={width}x{height}, seed={seed}, scale={guidance_scale}")
         
         result = pipeline(
             prompt=prompt,
