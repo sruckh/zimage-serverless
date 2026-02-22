@@ -7,8 +7,12 @@ VENV_PATH="$VOLUME_PATH/venv"
 INSTALL_FLAG="$VOLUME_PATH/.installed"
 LOG_FILE="$VOLUME_PATH/bootstrap.log"
 
-# Ensure the volume directory exists
+# Default HF_HOME if not set in Dockerfile/RunPod
+export HF_HOME="${HF_HOME:-/runpod-volume/huggingface}"
+
+# Ensure directories exist
 mkdir -p "$VOLUME_PATH"
+mkdir -p "$HF_HOME"
 
 # Redirect stdout and stderr to the log file and also to the console
 exec > >(tee -a "$LOG_FILE") 2>&1
