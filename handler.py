@@ -95,6 +95,10 @@ def handler(job):
         generator = torch.Generator("cuda").manual_seed(seed)
         print(f"Generating image: prompt='{prompt}', size={width}x{height}, seed={seed}, scale={guidance_scale}")
         
+        # Determine guidance_rescale from input (default to 0.0 as per common diffusers practice, 
+        # but can be set to 0.7 for high CFG to prevent overcooking)
+        guidance_rescale = job_input.get("guidance_rescale", 0.0)
+
         result = pipeline(
             prompt=prompt,
             negative_prompt=negative_prompt if negative_prompt else None,
@@ -102,6 +106,7 @@ def handler(job):
             width=width,
             num_inference_steps=steps,
             guidance_scale=guidance_scale,
+            guidance_rescale=guidance_rescale,
             generator=generator,
         ).images[0]
 
