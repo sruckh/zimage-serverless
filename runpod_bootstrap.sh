@@ -42,6 +42,17 @@ if [ ! -f "$INSTALL_FLAG" ]; then
     FLASH_ATTN_URL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
     pip install "$FLASH_ATTN_URL"
 
+    # Export model ID if not set (needed for hf download)
+    export MODEL_ID="${MODEL_ID:-Tongyi-MAI/Z-Image}"
+
+    # Pre-cache the model using the new 'hf' CLI for faster cold starts
+    echo "Pre-caching model: $MODEL_ID..."
+    if [ -n "$HF_TOKEN" ]; then
+        hf download "$MODEL_ID" --token "$HF_TOKEN"
+    else
+        hf download "$MODEL_ID"
+    fi
+
     # Sanity Checks
     echo "Running sanity checks..."
     python -c "import torch; print(f'Torch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
