@@ -39,7 +39,7 @@ if [ ! -f "$INSTALL_FLAG" ]; then
     
     # Install Diffusion & Utilities
     echo "Installing diffusers and utilities..."
-    pip install diffusers transformers accelerate safetensors boto3 runpod requests pillow
+    pip install diffusers transformers accelerate safetensors boto3 runpod requests pillow peft
     
     # Install Flash Attention
     echo "Installing Flash Attention 2.8.3..."
@@ -66,9 +66,14 @@ if [ ! -f "$INSTALL_FLAG" ]; then
     touch "$INSTALL_FLAG"
     echo "Installation complete."
 else
-    echo "Software already installed (flag found at $INSTALL_FLAG). Skipping installation."
+    echo "Software already installed (flag found at $INSTALL_FLAG). Skipping main installation."
     source "$VENV_PATH/bin/activate"
 fi
+
+# --- One-time hack / Dynamic Dependency Check ---
+# This ensures new dependencies added to the project are installed even if the volume was already initialized.
+echo "Checking for additional dependencies..."
+python -c "import peft" 2>/dev/null || (echo "Installing missing dependency: peft..." && pip install peft)
 
 # Export model ID if not set
 export MODEL_ID="${MODEL_ID:-Tongyi-MAI/Z-Image}"
