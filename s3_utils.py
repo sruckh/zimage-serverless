@@ -2,9 +2,10 @@ import os
 import boto3
 from botocore.client import Config
 
-def upload_image_to_s3(file_path, object_name):
+def upload_image_to_s3(file_path, object_name, expiration=3600):
     """
-    Uploads an image to an S3-compatible bucket (e.g., Backblaze B2).
+    Uploads an image to an S3-compatible bucket (e.g., Backblaze B2)
+    and returns a pre-signed URL.
     """
     endpoint_url = os.environ.get("S3_ENDPOINT_URL")
     access_key = os.environ.get("S3_ACCESS_KEY_ID")
@@ -23,14 +24,16 @@ def upload_image_to_s3(file_path, object_name):
     )
 
     try:
+        # Upload the file
         s3.upload_file(file_path, bucket_name, object_name, ExtraArgs={'ContentType': 'image/jpeg'})
-        # Construct the URL. Note: This assumes the bucket is public or you have a specific URL format.
-        # For B2, it's often https://<bucket>.<endpoint>/<object> or similar.
-        # A more robust way might be to generate a presigned URL if it's private, 
-        # but usually for serverless outputs, we return a direct link if public.
-        # We'll return a simple concatenation or the user can configure the base URL.
-        base_url = os.environ.get("S3_BASE_URL", f"{endpoint_url}/{bucket_name}")
-        return f"{base_url}/{object_name}"
+        
+        # Generate a pre-signed URL for the uploaded object
+        response = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket_name, 'Key': object_name},
+            ExpiresIn=expiration
+        )
+        return response
     except Exception as e:
-        print(f"Error uploading to S3: {e}")
+        print(f"Error uploading to S3 or generating pre-signed URL: {e}")
         raise e

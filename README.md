@@ -40,10 +40,13 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `width` | Integer | No | `1024` | Image width. |
 | `height` | Integer | No | `1024` | Image height. |
 | `steps` | Integer | No | `30` | Number of inference steps. |
-| `guidance_scale` | Float | No | `4.0` | CFG scale. |
+| `guidance_scale` | Float | No | `3.5` | CFG scale (3.0-4.5 recommended for likeness). |
+| `cfg_normalization`| Boolean | No | `True` | Set to True for realistic skin textures. |
+| `cfg_truncation` | Float | No | `1.0` | 1.0 recommended; lower to fix over-saturation. |
+| `max_sequence_length`| Integer | No | `512` | Token limit for long prompts. |
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |
-| `lora_scale` | Float | No | `1.0` | Strength of the LoRA adapter. |
-| `adapter_name` | String | No | `"subject"` | Internal identifier for the LoRA. |
+| `lora_scale` | Float | No | `0.9` | Strength of the LoRA adapter (0.8-0.9 recommended). |
+| `adapter_name` | String | No | - | Unique ID (auto-generated if not provided). |
 
 ### Example Request Body
 

@@ -64,9 +64,14 @@ def handler(job):
         width = job_input.get("width", 1024)
         height = job_input.get("height", 1024)
         steps = job_input.get("steps", 30)
-        guidance_scale = job_input.get("guidance_scale", 4.0)
+        guidance_scale = job_input.get("guidance_scale", 3.5)
         seed = job_input.get("seed", 42)
-        lora_scale = job_input.get("lora_scale", 1.0)
+        lora_scale = job_input.get("lora_scale", 0.9)
+        
+        # New high-quality parameters from Z-Image guide
+        cfg_normalization = job_input.get("cfg_normalization", True)
+        cfg_truncation = job_input.get("cfg_truncation", 1.0)
+        max_sequence_length = job_input.get("max_sequence_length", 512)
         
         # Generate a unique adapter name for this request to avoid PEFT collisions
         request_id = str(uuid.uuid4())[:8]
@@ -95,10 +100,6 @@ def handler(job):
         generator = torch.Generator("cuda").manual_seed(seed)
         print(f"Generating image: prompt='{prompt}', size={width}x{height}, seed={seed}, scale={guidance_scale}")
         
-        # Determine guidance_rescale from input (default to 0.0 as per common diffusers practice, 
-        # but can be set to 0.7 for high CFG to prevent overcooking)
-        guidance_rescale = job_input.get("guidance_rescale", 0.0)
-
         result = pipeline(
             prompt=prompt,
             negative_prompt=negative_prompt if negative_prompt else None,
@@ -106,7 +107,9 @@ def handler(job):
             width=width,
             num_inference_steps=steps,
             guidance_scale=guidance_scale,
-            guidance_rescale=guidance_rescale,
+            cfg_normalization=cfg_normalization,
+            cfg_truncation=cfg_truncation,
+            max_sequence_length=max_sequence_length,
             generator=generator,
         ).images[0]
 
