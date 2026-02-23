@@ -5,7 +5,7 @@ import requests
 import uuid
 import traceback
 from PIL import Image
-from diffusers import ZImagePipeline
+from diffusers import ZImagePipeline, EulerAncestralDiscreteScheduler
 from s3_utils import upload_image_to_s3
 
 # Environment Variables
@@ -31,6 +31,10 @@ def get_pipeline():
             low_cpu_mem_usage=True,
             token=hf_token if hf_token else None
         )
+        
+        # Switch to EulerAncestralDiscreteScheduler for sharper, more realistic details
+        # Often preferred for realistic portraits and detailed textures
+        pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
         
         pipe.to("cuda")
         print("Model loaded successfully.")
