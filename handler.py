@@ -1,3 +1,5 @@
+import time
+t_start = time.time()
 import runpod
 import os
 import torch
@@ -5,8 +7,10 @@ import requests
 import uuid
 import traceback
 from PIL import Image
-from diffusers import ZImagePipeline, FlowMatchHeunDiscreteScheduler
+from diffusers import ZImagePipeline, FlowMatchEulerDiscreteScheduler
 from s3_utils import upload_image_to_s3
+
+print(f"--- Initializing Handler (Imports took {time.time() - t_start:.2f}s) ---")
 
 # Environment Variables
 MODEL_ID = os.environ.get("MODEL_ID", "Tongyi-MAI/Z-Image")
@@ -32,9 +36,14 @@ def get_pipeline():
             token=hf_token if hf_token else None
         )
         
-        # Switch to FlowMatchHeunDiscreteScheduler for sharper, more realistic details
-        # This is a 2nd-order solver specifically for Flow-Matching architectures (like Z-Image)
-        pipe.scheduler = FlowMatchHeunDiscreteScheduler.from_config(pipe.scheduler.config)
+        # Use FlowMatchEulerDiscreteScheduler but optimize for high-quality realism.
+        # Enabling Karras sigmas and setting shift=3.0 provides sharper details 
+        # while maintaining compatibility with the pipeline's dynamic shifting (mu parameter).
+        pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+            pipe.scheduler.config,
+            use_karras_sigmas=True,
+            shift=3.0
+        )
         
         pipe.to("cuda")
         print("Model loaded successfully.")
