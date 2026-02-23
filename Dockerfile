@@ -12,10 +12,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install them into the system python
-# This ensures imports are fast (on local SSD) instead of slow (on network volume)
+# Copy requirements and install them
+# We use --break-system-packages because this is a dedicated container environment
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt --index-url https://download.pytorch.org/whl/cu128
+
+# 1. Install heavy AI frameworks first (from specific torch index)
+RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 --break-system-packages
+
+# 2. Install remaining utilities from standard PyPI
+RUN pip install --no-cache-dir runpod boto3 requests pillow diffusers transformers accelerate safetensors peft --break-system-packages
 
 # Copy scripts into the container
 COPY runpod_bootstrap.sh .
