@@ -4,7 +4,7 @@ import torch
 import requests
 import uuid
 from PIL import Image
-from diffusers import ZImagePipeline
+from diffusers import ZImagePipeline, DPMSolverMultistepScheduler
 from s3_utils import upload_image_to_s3
 
 # Environment Variables
@@ -30,6 +30,14 @@ def get_pipeline():
             low_cpu_mem_usage=True,
             token=hf_token if hf_token else None
         )
+        
+        # Switch to a scheduler known for producing sharper, more realistic details
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            pipe.scheduler.config,
+            use_karras_sigmas=True,
+            algorithm_type="sde-dpmsolver++"
+        )
+        
         pipe.to("cuda")
         print("Model loaded successfully.")
     return pipe
@@ -63,10 +71,10 @@ def handler(job):
         negative_prompt = job_input.get("negative_prompt", "")
         width = job_input.get("width", 1024)
         height = job_input.get("height", 1024)
-        steps = job_input.get("steps", 30)
-        guidance_scale = job_input.get("guidance_scale", 3.5)
+        steps = job_input.get("steps", 50)
+        guidance_scale = job_input.get("guidance_scale", 3.0)
         seed = job_input.get("seed", 42)
-        lora_scale = job_input.get("lora_scale", 0.9)
+        lora_scale = job_input.get("lora_scale", 0.85)
         
         # New high-quality parameters from Z-Image guide
         cfg_normalization = job_input.get("cfg_normalization", True)
