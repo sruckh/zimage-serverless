@@ -6,7 +6,7 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
-- **Optimized Realism:** Uses 50 steps, `cfg_normalization=True`, and `cfg_truncation=0.8` for professional-quality skin textures and sharpness.
+- **Optimized Realism:** Uses 50 steps, `cfg_normalization=True`, and `cfg_truncation=0.7` for professional-quality skin textures and sharpness.
 - **Dynamic LoRA Support:** Load LoRAs from any URL at runtime with automatic cleanup.
 - **S3 Integration:** Automatically uploads generated images to an S3-compatible bucket (configured for Backblaze B2).
 

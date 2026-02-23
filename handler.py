@@ -77,7 +77,7 @@ def handler(job):
         
         # New high-quality parameters from Z-Image guide
         cfg_normalization = job_input.get("cfg_normalization", True)
-        cfg_truncation = job_input.get("cfg_truncation", 0.8) # 0.8 fixes saturation/blurriness
+        cfg_truncation = job_input.get("cfg_truncation", 0.7) # 0.7 provides better bite/contrast than 0.8
         max_sequence_length = job_input.get("max_sequence_length", 512)
         
         # Generate a unique adapter name for this request to avoid PEFT collisions
@@ -111,7 +111,6 @@ def handler(job):
             width=width,
             num_inference_steps=steps,
             guidance_scale=guidance_scale,
-            guidance_rescale=0.7,        # Improves contrast and prevents the "washed out" look
             cfg_normalization=cfg_normalization,
             cfg_truncation=cfg_truncation,
             max_sequence_length=max_sequence_length,
