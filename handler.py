@@ -3,8 +3,9 @@ import os
 import torch
 import requests
 import uuid
+import traceback
 from PIL import Image
-from diffusers import ZImagePipeline, DPMSolverMultistepScheduler
+from diffusers import ZImagePipeline
 from s3_utils import upload_image_to_s3
 
 # Environment Variables
@@ -29,13 +30,6 @@ def get_pipeline():
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
             token=hf_token if hf_token else None
-        )
-        
-        # Switch to a scheduler known for producing sharper, more realistic details
-        pipe.scheduler = DPMSolverMultistepScheduler.from_config(
-            pipe.scheduler.config,
-            use_karras_sigmas=True,
-            algorithm_type="sde-dpmsolver++"
         )
         
         pipe.to("cuda")
@@ -140,7 +134,8 @@ def handler(job):
         return {"image_url": s3_url}
 
     except Exception as e:
-        print(f"Error in handler: {str(e)}")
+        print(f"Error in handler: {repr(e)}")
+        traceback.print_exc()
         return {"error": str(e)}
 
 if __name__ == "__main__":
