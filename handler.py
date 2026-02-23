@@ -5,7 +5,7 @@ import requests
 import uuid
 import traceback
 from PIL import Image
-from diffusers import ZImagePipeline, EulerAncestralDiscreteScheduler
+from diffusers import ZImagePipeline, FlowMatchHeunDiscreteScheduler
 from s3_utils import upload_image_to_s3
 
 # Environment Variables
@@ -32,9 +32,9 @@ def get_pipeline():
             token=hf_token if hf_token else None
         )
         
-        # Switch to EulerAncestralDiscreteScheduler for sharper, more realistic details
-        # Often preferred for realistic portraits and detailed textures
-        pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+        # Switch to FlowMatchHeunDiscreteScheduler for sharper, more realistic details
+        # This is a 2nd-order solver specifically for Flow-Matching architectures (like Z-Image)
+        pipe.scheduler = FlowMatchHeunDiscreteScheduler.from_config(pipe.scheduler.config)
         
         pipe.to("cuda")
         print("Model loaded successfully.")
