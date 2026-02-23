@@ -87,12 +87,9 @@ def handler(job):
         # 2. Setup Pipeline
         pipeline = get_pipeline()
         
-        # Enable VAE tiling for better quality and memory efficiency
-        pipeline.vae.enable_tiling()
-
-        # 3. Handle LoRA - Clean start every time
-        # CRITICAL: Always unload previous LoRAs to prevent stacking/corruption in a persistent worker
-        print("Unloading any existing LoRA weights...")
+        # 3. Handle LoRA - Clean start every time to prevent artifacts and "smearing"
+        # CRITICAL: In a persistent worker, we must unload old weights before loading new ones
+        print("Unloading any existing LoRA weights for a clean slate...")
         pipeline.unload_lora_weights()
         
         lora_path = None
@@ -114,6 +111,7 @@ def handler(job):
             width=width,
             num_inference_steps=steps,
             guidance_scale=guidance_scale,
+            guidance_rescale=0.7,        # Improves contrast and prevents the "washed out" look
             cfg_normalization=cfg_normalization,
             cfg_truncation=cfg_truncation,
             max_sequence_length=max_sequence_length,
