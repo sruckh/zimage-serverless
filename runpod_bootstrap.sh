@@ -17,10 +17,10 @@ echo "--- Bootstrap started at $(date) ---"
 if [ ! -f "$INSTALL_FLAG" ]; then
     echo "First start with new optimized image. Caching models..."
     
-    # We use the system python now, no venv needed for core libs
-    # Flash Attention might need a local build if the wheel doesn't match
-    echo "Checking Flash Attention..."
-    pip install flash-attn --no-build-isolation || echo "Flash Attention build failed, falling back to standard attention."
+    # Flash Attention - use specific wheel to avoid 30min compilation
+    echo "Installing Flash Attention from pre-built wheel..."
+    FLASH_ATTN_URL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+    pip install "$FLASH_ATTN_URL" --break-system-packages || echo "Flash Attention wheel failed, falling back to source (slow)..." && pip install flash-attn --break-system-packages
 
     export MODEL_ID="${MODEL_ID:-Tongyi-MAI/Z-Image}"
     echo "Pre-caching model: $MODEL_ID..."
