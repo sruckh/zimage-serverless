@@ -4,10 +4,10 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 
 ## Features
 
-- **Minimal Container:** Heavy dependencies (PyTorch, Flash Attention) are installed at runtime on the first cold start to keep the image small.
-- **Persistent Volume Support:** Software is installed into a virtual environment on `/runpod-volume/zimage-diffusion`. A `.installed` flag ensures installation happens only once.
-- **Optimized Defaults:** Uses `FlowMatchEulerDiscreteScheduler` with Karras sigmas, 50 steps, and 3.0 CFG for professional-quality realism and sharpness.
-- **Dynamic LoRA Support:** Load LoRAs from any URL at runtime. LoRAs are downloaded to ephemeral storage and cleaned up after each job.
+- **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
+- **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
+- **Optimized Realism:** Uses 50 steps, `cfg_normalization=True`, and `cfg_truncation=0.8` for professional-quality skin textures and sharpness.
+- **Dynamic LoRA Support:** Load LoRAs from any URL at runtime with automatic cleanup.
 - **S3 Integration:** Automatically uploads generated images to an S3-compatible bucket (configured for Backblaze B2).
 
 ## Environment Variables (RunPod Configuration)

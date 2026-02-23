@@ -1,0 +1,13 @@
+runpod
+boto3
+requests
+pillow
+torch==2.8.0
+torchvision==0.23.0
+torchaudio==2.8.0
+diffusers
+transformers
+accelerate
+safetensors
+peft
+# Note: Flash attention remains in the bootstrap because it's hardware-specific

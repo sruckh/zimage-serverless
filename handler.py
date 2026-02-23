@@ -28,7 +28,6 @@ def get_pipeline():
     if pipe is None:
         hf_token = os.environ.get("HF_TOKEN")
         print(f"Loading model: {MODEL_ID}")
-        # Note: MODEL_ID can be a repo name or a path on the network volume
         pipe = ZImagePipeline.from_pretrained(
             MODEL_ID,
             torch_dtype=torch.bfloat16,
@@ -36,15 +35,8 @@ def get_pipeline():
             token=hf_token if hf_token else None
         )
         
-        # Use FlowMatchEulerDiscreteScheduler but optimize for high-quality realism.
-        # Enabling Karras sigmas and setting shift=3.0 provides sharper details 
-        # while maintaining compatibility with the pipeline's dynamic shifting (mu parameter).
-        pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
-            pipe.scheduler.config,
-            use_karras_sigmas=True,
-            shift=3.0
-        )
-        
+        # Enable stable high-quality settings
+        pipe.vae.enable_tiling()
         pipe.to("cuda")
         print("Model loaded successfully.")
     return pipe
@@ -79,13 +71,13 @@ def handler(job):
         width = job_input.get("width", 1024)
         height = job_input.get("height", 1024)
         steps = job_input.get("steps", 50)
-        guidance_scale = job_input.get("guidance_scale", 3.0)
+        guidance_scale = job_input.get("guidance_scale", 3.5)
         seed = job_input.get("seed", 42)
         lora_scale = job_input.get("lora_scale", 0.85)
         
         # New high-quality parameters from Z-Image guide
         cfg_normalization = job_input.get("cfg_normalization", True)
-        cfg_truncation = job_input.get("cfg_truncation", 1.0)
+        cfg_truncation = job_input.get("cfg_truncation", 0.8) # 0.8 fixes saturation/blurriness
         max_sequence_length = job_input.get("max_sequence_length", 512)
         
         # Generate a unique adapter name for this request to avoid PEFT collisions
