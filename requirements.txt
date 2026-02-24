@@ -10,4 +10,5 @@ transformers
 accelerate
 safetensors
 peft
+scipy
 # Note: Flash attention remains in the bootstrap because it's hardware-specific

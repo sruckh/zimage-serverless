@@ -23,6 +23,40 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Global model cache to avoid re-loading across jobs in the same session
 pipe = None
 
+def _to_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+def _configure_scheduler(pipeline, use_beta_sigmas):
+    """
+    Rebuild scheduler from the loaded model config while optionally enabling beta sigmas.
+    """
+    current_use_beta_sigmas = bool(pipeline.scheduler.config.get("use_beta_sigmas", False))
+    if current_use_beta_sigmas == use_beta_sigmas:
+        return
+    try:
+        pipeline.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+            pipeline.scheduler.config,
+            use_beta_sigmas=use_beta_sigmas,
+        )
+        print(f"Scheduler configured with use_beta_sigmas={use_beta_sigmas}")
+    except Exception as e:
+        print(
+            f"Warning: could not configure scheduler use_beta_sigmas={use_beta_sigmas} "
+            f"(keeping model default): {repr(e)}"
+        )
+
 def get_pipeline():
     global pipe
     if pipe is None:
@@ -34,9 +68,7 @@ def get_pipeline():
             low_cpu_mem_usage=True,
             token=hf_token if hf_token else None
         )
-        
-        # Enable stable high-quality settings
-        pipe.vae.enable_tiling()
+
         pipe.to("cuda")
         print("Model loaded successfully.")
     return pipe
@@ -68,17 +100,28 @@ def handler(job):
 
         lora_url = job_input.get("lora_url")
         negative_prompt = job_input.get("negative_prompt", "")
-        width = job_input.get("width", 1024)
-        height = job_input.get("height", 1024)
-        steps = job_input.get("steps", 50)
-        guidance_scale = job_input.get("guidance_scale", 3.5)
-        seed = job_input.get("seed", 42)
-        lora_scale = job_input.get("lora_scale", 0.85)
-        
-        # New high-quality parameters from Z-Image guide
-        cfg_normalization = job_input.get("cfg_normalization", True)
-        cfg_truncation = job_input.get("cfg_truncation", 0.7) # 0.7 provides better bite/contrast than 0.8
-        max_sequence_length = job_input.get("max_sequence_length", 512)
+        width = int(job_input.get("width", 1024))
+        height = int(job_input.get("height", 1024))
+        steps = int(job_input.get("steps", 50))
+        guidance_scale = float(job_input.get("guidance_scale", 3.5))
+        seed = int(job_input.get("seed", 42))
+        lora_scale = float(job_input.get("lora_scale", 0.85))
+
+        # Z-Image base defaults from official docs: cfg_normalization=False, cfg_truncation=1.0
+        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=False)
+        cfg_truncation = float(job_input.get("cfg_truncation", 1.0))
+        max_sequence_length = int(job_input.get("max_sequence_length", 512))
+
+        # Enable beta-sigmas by default for cleaner denoising schedule; can be overridden per request.
+        env_use_beta_sigmas = _to_bool(os.environ.get("USE_BETA_SIGMAS"), default=True)
+        use_beta_sigmas = _to_bool(job_input.get("use_beta_sigmas"), default=env_use_beta_sigmas)
+
+        # Keep VAE tiling off at 1024-ish outputs unless explicitly requested.
+        vae_tiling_input = job_input.get("vae_tiling")
+        if vae_tiling_input is None:
+            vae_tiling = (width * height) > (1024 * 1024)
+        else:
+            vae_tiling = _to_bool(vae_tiling_input, default=False)
         
         # Generate a unique adapter name for this request to avoid PEFT collisions
         request_id = str(uuid.uuid4())[:8]
@@ -86,6 +129,17 @@ def handler(job):
 
         # 2. Setup Pipeline
         pipeline = get_pipeline()
+        _configure_scheduler(pipeline, use_beta_sigmas)
+
+        if vae_tiling:
+            pipeline.vae.enable_tiling()
+        else:
+            pipeline.vae.disable_tiling()
+        print(
+            f"Inference controls: use_beta_sigmas={use_beta_sigmas}, "
+            f"cfg_normalization={cfg_normalization}, cfg_truncation={cfg_truncation}, "
+            f"vae_tiling={vae_tiling}"
+        )
         
         # 3. Handle LoRA - Clean start every time to prevent artifacts and "smearing"
         # CRITICAL: In a persistent worker, we must unload old weights before loading new ones

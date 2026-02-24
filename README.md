@@ -6,7 +6,9 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
-- **Optimized Realism:** Uses 50 steps, `cfg_normalization=True`, and `cfg_truncation=0.7` for professional-quality skin textures and sharpness.
+- **Z-Image Aligned Defaults:** Uses 50 steps with base-model aligned CFG defaults (`cfg_normalization=False`, `cfg_truncation=1.0`).
+- **Scheduler Control:** Supports `use_beta_sigmas` to toggle FlowMatch beta-sigma scheduling.
+- **Adaptive VAE Tiling:** Keeps VAE tiling off at 1024-ish outputs by default to reduce potential tile artifacts, while enabling it for larger images.
 - **Dynamic LoRA Support:** Load LoRAs from any URL at runtime with automatic cleanup.
 - **S3 Integration:** Automatically uploads generated images to an S3-compatible bucket (configured for Backblaze B2).
 
@@ -42,11 +44,13 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `height` | Integer | No | `1024` | Image height. |
 | `steps` | Integer | No | `50` | Number of inference steps. |
 | `guidance_scale` | Float | No | `3.0` | CFG scale (3.0-4.5 recommended for likeness). |
-| `cfg_normalization`| Boolean | No | `True` | Set to True for realistic skin textures. |
+| `cfg_normalization`| Boolean | No | `False` | Z-Image base default behavior. |
 | `cfg_truncation` | Float | No | `1.0` | 1.0 recommended; lower to fix over-saturation. |
 | `max_sequence_length`| Integer | No | `512` | Token limit for long prompts. |
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |
 | `lora_scale` | Float | No | `0.85` | Strength of the LoRA adapter (0.8-0.9 recommended). |
+| `use_beta_sigmas` | Boolean | No | `True` | Rebuilds FlowMatch scheduler with beta sigmas for cleaner denoising. |
+| `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling behavior (`auto`: on only for >1024×1024 area). |
 | `adapter_name` | String | No | - | Unique ID (auto-generated if not provided). |
 
 ### Example Request Body
