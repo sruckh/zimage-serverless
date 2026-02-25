@@ -7,7 +7,7 @@ import requests
 import uuid
 import traceback
 from PIL import Image
-from diffusers import ZImagePipeline, FlowMatchEulerDiscreteScheduler
+from diffusers import ZImagePipeline, ZImageImg2ImgPipeline, FlowMatchEulerDiscreteScheduler
 from s3_utils import upload_image_to_s3
 
 print(f"--- Initializing Handler (Imports took {time.time() - t_start:.2f}s) ---")
@@ -22,6 +22,17 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Global model cache to avoid re-loading across jobs in the same session
 pipe = None
+img2img_pipe = None
+upscaler = None
+
+UPSCALE_MODEL_URL = os.environ.get(
+    "UPSCALE_MODEL_URL",
+    "https://github.com/starinspace/StarinspaceUpscale/releases/download/Models/4xPurePhoto-RealPLSKR.pth",
+)
+UPSCALE_MODEL_PATH = os.environ.get(
+    "UPSCALE_MODEL_PATH",
+    "/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth",
+)
 
 def _to_bool(value, default=False):
     if value is None:
@@ -57,6 +68,19 @@ def _configure_scheduler(pipeline, use_beta_sigmas):
             f"(keeping model default): {repr(e)}"
         )
 
+def _download_file(url, destination_path):
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+    tmp_path = f"{destination_path}.tmp_{uuid.uuid4().hex}"
+    print(f"Downloading file from {url} -> {destination_path}")
+    response = requests.get(url, stream=True, timeout=300)
+    response.raise_for_status()
+    with open(tmp_path, "wb") as f:
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
+    os.replace(tmp_path, destination_path)
+    print(f"Download complete: {destination_path}")
+
 def get_pipeline():
     global pipe
     if pipe is None:
@@ -72,6 +96,49 @@ def get_pipeline():
         pipe.to("cuda")
         print("Model loaded successfully.")
     return pipe
+
+def get_img2img_pipeline():
+    global img2img_pipe
+    if img2img_pipe is None:
+        base_pipe = get_pipeline()
+        img2img_pipe = ZImageImg2ImgPipeline(**base_pipe.components)
+        img2img_pipe.to("cuda")
+        print("ZImageImg2ImgPipeline initialized from base pipeline components.")
+    return img2img_pipe
+
+def get_upscaler():
+    global upscaler
+    if upscaler is None:
+        if not os.path.exists(UPSCALE_MODEL_PATH):
+            _download_file(UPSCALE_MODEL_URL, UPSCALE_MODEL_PATH)
+
+        # Lazy import to avoid startup overhead when second pass is disabled.
+        from basicsr.archs.rrdbnet_arch import RRDBNet
+        from realesrgan import RealESRGANer
+
+        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+        upscaler = RealESRGANer(
+            scale=4,
+            model_path=UPSCALE_MODEL_PATH,
+            model=model,
+            tile=0,
+            tile_pad=10,
+            pre_pad=0,
+            half=True,
+        )
+        print("RealESRGAN upscaler initialized.")
+    return upscaler
+
+def upscale_image(image, outscale):
+    import cv2
+    import numpy as np
+
+    upsampler = get_upscaler()
+    rgb = np.array(image.convert("RGB"))
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    out_bgr, _ = upsampler.enhance(bgr, outscale=outscale)
+    out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(out_rgb)
 
 def download_lora(url):
     """
@@ -116,12 +183,39 @@ def handler(job):
         env_use_beta_sigmas = _to_bool(os.environ.get("USE_BETA_SIGMAS"), default=True)
         use_beta_sigmas = _to_bool(job_input.get("use_beta_sigmas"), default=env_use_beta_sigmas)
 
+        # Optional second-pass refinement: upscale + Z-Image img2img
+        second_pass_enabled_default = _to_bool(os.environ.get("SECOND_PASS_DEFAULT_ENABLED"), default=True)
+        second_pass_enabled = _to_bool(
+            job_input.get("second_pass_enabled"),
+            default=second_pass_enabled_default,
+        )
+        second_pass_upscale = float(job_input.get("second_pass_upscale", 2.0))
+        second_pass_strength = float(job_input.get("second_pass_strength", 0.3))
+        second_pass_steps = int(job_input.get("second_pass_steps", 10))
+        second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 2.8))
+        second_pass_seed = int(job_input.get("second_pass_seed", seed))
+        second_pass_cfg_normalization = _to_bool(
+            job_input.get("second_pass_cfg_normalization"),
+            default=False,
+        )
+        second_pass_cfg_truncation = float(job_input.get("second_pass_cfg_truncation", 1.0))
+        second_pass_use_beta_sigmas = _to_bool(
+            job_input.get("second_pass_use_beta_sigmas"),
+            default=use_beta_sigmas,
+        )
+
         # Keep VAE tiling off at 1024-ish outputs unless explicitly requested.
         vae_tiling_input = job_input.get("vae_tiling")
         if vae_tiling_input is None:
             vae_tiling = (width * height) > (1024 * 1024)
         else:
             vae_tiling = _to_bool(vae_tiling_input, default=False)
+
+        second_pass_vae_tiling_input = job_input.get("second_pass_vae_tiling")
+        if second_pass_vae_tiling_input is None:
+            second_pass_vae_tiling = (width * height * (second_pass_upscale ** 2)) > (1024 * 1024)
+        else:
+            second_pass_vae_tiling = _to_bool(second_pass_vae_tiling_input, default=True)
         
         # Generate a unique adapter name for this request to avoid PEFT collisions
         request_id = str(uuid.uuid4())[:8]
@@ -129,22 +223,32 @@ def handler(job):
 
         # 2. Setup Pipeline
         pipeline = get_pipeline()
+        img2img_pipeline = get_img2img_pipeline() if second_pass_enabled else None
         _configure_scheduler(pipeline, use_beta_sigmas)
+        if img2img_pipeline is not None:
+            _configure_scheduler(img2img_pipeline, second_pass_use_beta_sigmas)
 
         if vae_tiling:
             pipeline.vae.enable_tiling()
         else:
             pipeline.vae.disable_tiling()
+        if img2img_pipeline is not None:
+            if second_pass_vae_tiling:
+                img2img_pipeline.vae.enable_tiling()
+            else:
+                img2img_pipeline.vae.disable_tiling()
         print(
             f"Inference controls: use_beta_sigmas={use_beta_sigmas}, "
             f"cfg_normalization={cfg_normalization}, cfg_truncation={cfg_truncation}, "
-            f"vae_tiling={vae_tiling}"
+            f"vae_tiling={vae_tiling}, second_pass_enabled={second_pass_enabled}"
         )
         
         # 3. Handle LoRA - Clean start every time to prevent artifacts and "smearing"
         # CRITICAL: In a persistent worker, we must unload old weights before loading new ones
         print("Unloading any existing LoRA weights for a clean slate...")
         pipeline.unload_lora_weights()
+        if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
+            img2img_pipeline.unload_lora_weights()
         
         lora_path = None
         if lora_url:
@@ -152,6 +256,9 @@ def handler(job):
             print(f"Loading LoRA from {lora_path} with scale {lora_scale}")
             pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
             pipeline.set_adapters([adapter_name], adapter_weights=[lora_scale])
+            if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
+                img2img_pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
+                img2img_pipeline.set_adapters([adapter_name], adapter_weights=[lora_scale])
             print(f"LoRA '{adapter_name}' loaded successfully.")
 
         # 4. Generate Image
@@ -170,6 +277,28 @@ def handler(job):
             max_sequence_length=max_sequence_length,
             generator=generator,
         ).images[0]
+
+        # 4b. Optional second pass: upscale then refine with img2img
+        if second_pass_enabled and img2img_pipeline is not None:
+            print(
+                "Running second pass refinement "
+                f"(upscale={second_pass_upscale}, strength={second_pass_strength}, "
+                f"steps={second_pass_steps}, guidance={second_pass_guidance_scale})"
+            )
+            upscaled_image = upscale_image(result, second_pass_upscale)
+            second_generator = torch.Generator("cuda").manual_seed(second_pass_seed)
+            result = img2img_pipeline(
+                prompt=prompt,
+                image=upscaled_image,
+                negative_prompt=negative_prompt if negative_prompt else None,
+                strength=second_pass_strength,
+                num_inference_steps=second_pass_steps,
+                guidance_scale=second_pass_guidance_scale,
+                cfg_normalization=second_pass_cfg_normalization,
+                cfg_truncation=second_pass_cfg_truncation,
+                max_sequence_length=max_sequence_length,
+                generator=second_generator,
+            ).images[0]
 
         # 5. Save as High-Quality JPG
         output_filename = f"{uuid.uuid4()}.jpg"

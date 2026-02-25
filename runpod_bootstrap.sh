@@ -7,8 +7,11 @@ INSTALL_FLAG="$VOLUME_PATH/.installed_v2" # Bump version to re-trigger
 LOG_FILE="$VOLUME_PATH/bootstrap.log"
 
 export HF_HOME="${HF_HOME:-/runpod-volume/huggingface}"
+export UPSCALE_MODEL_URL="${UPSCALE_MODEL_URL:-https://github.com/starinspace/StarinspaceUpscale/releases/download/Models/4xPurePhoto-RealPLSKR.pth}"
+export UPSCALE_MODEL_PATH="${UPSCALE_MODEL_PATH:-/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth}"
 mkdir -p "$VOLUME_PATH"
 mkdir -p "$HF_HOME"
+mkdir -p "$(dirname "$UPSCALE_MODEL_PATH")"
 
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -29,6 +32,14 @@ if [ ! -f "$INSTALL_FLAG" ]; then
     touch "$INSTALL_FLAG"
 else
     echo "Environment already optimized."
+fi
+
+# Ensure the upscaler checkpoint exists on volume even when base install is already complete.
+if [ ! -f "$UPSCALE_MODEL_PATH" ]; then
+    echo "Caching upscaler model to volume: $UPSCALE_MODEL_PATH"
+    curl -L --fail --retry 3 --retry-delay 2 "$UPSCALE_MODEL_URL" -o "$UPSCALE_MODEL_PATH"
+else
+    echo "Upscaler model already cached: $UPSCALE_MODEL_PATH"
 fi
 
 echo "Starting RunPod Handler..."
