@@ -315,6 +315,150 @@ def download_lora(url):
             f.write(chunk)
     return local_path
 
+def _normalize_lora_key_prefix(key):
+    normalized = key
+    for prefix in ("base_model.model.", "diffusion_model.", "transformer."):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+    return normalized
+
+def _looks_like_flux2_klein_lora(state_dict):
+    markers = (
+        "double_blocks.",
+        "single_blocks.",
+        "img_attn.qkv.",
+        "txt_attn.qkv.",
+        "img_mlp.0.",
+        "txt_mlp.0.",
+    )
+    for key in state_dict.keys():
+        normalized = _normalize_lora_key_prefix(key)
+        if any(marker in normalized for marker in markers):
+            return True
+    return False
+
+def _convert_flux2_klein_lora_to_diffusers(state_dict):
+    """
+    Convert Flux2/Klein-style LoRA keys (double_blocks/single_blocks) to the
+    transformer key layout expected by Diffusers Z-Image PEFT loading.
+    """
+    converted_state_dict = {}
+    original_state_dict = {
+        _normalize_lora_key_prefix(k): v for k, v in state_dict.items()
+    }
+
+    has_lora_down_up = any("lora_down" in k or "lora_up" in k for k in original_state_dict.keys())
+    if has_lora_down_up:
+        temp_state_dict = {}
+        for k, v in original_state_dict.items():
+            temp_state_dict[k.replace("lora_down", "lora_A").replace("lora_up", "lora_B")] = v
+        original_state_dict = temp_state_dict
+
+    num_double_layers = 0
+    num_single_layers = 0
+    for key in original_state_dict.keys():
+        if key.startswith("single_blocks."):
+            num_single_layers = max(num_single_layers, int(key.split(".")[1]) + 1)
+        elif key.startswith("double_blocks."):
+            num_double_layers = max(num_double_layers, int(key.split(".")[1]) + 1)
+
+    lora_keys = ("lora_A", "lora_B")
+    attn_types = ("img_attn", "txt_attn")
+
+    for sl in range(num_single_layers):
+        single_block_prefix = f"single_blocks.{sl}"
+        attn_prefix = f"single_transformer_blocks.{sl}.attn"
+        for lora_key in lora_keys:
+            linear1_key = f"{single_block_prefix}.linear1.{lora_key}.weight"
+            if linear1_key in original_state_dict:
+                converted_state_dict[f"{attn_prefix}.to_qkv_mlp_proj.{lora_key}.weight"] = original_state_dict.pop(
+                    linear1_key
+                )
+            linear2_key = f"{single_block_prefix}.linear2.{lora_key}.weight"
+            if linear2_key in original_state_dict:
+                converted_state_dict[f"{attn_prefix}.to_out.{lora_key}.weight"] = original_state_dict.pop(linear2_key)
+
+    for dl in range(num_double_layers):
+        transformer_block_prefix = f"transformer_blocks.{dl}"
+
+        for lora_key in lora_keys:
+            for attn_type in attn_types:
+                attn_prefix = f"{transformer_block_prefix}.attn"
+                qkv_key = f"double_blocks.{dl}.{attn_type}.qkv.{lora_key}.weight"
+                if qkv_key not in original_state_dict:
+                    continue
+
+                fused_qkv_weight = original_state_dict.pop(qkv_key)
+                if lora_key == "lora_A":
+                    proj_keys = (
+                        ["to_q", "to_k", "to_v"]
+                        if attn_type == "img_attn"
+                        else ["add_q_proj", "add_k_proj", "add_v_proj"]
+                    )
+                    for proj_key in proj_keys:
+                        converted_state_dict[f"{attn_prefix}.{proj_key}.{lora_key}.weight"] = fused_qkv_weight
+                else:
+                    sample_q, sample_k, sample_v = torch.chunk(fused_qkv_weight, 3, dim=0)
+                    if attn_type == "img_attn":
+                        converted_state_dict[f"{attn_prefix}.to_q.{lora_key}.weight"] = sample_q
+                        converted_state_dict[f"{attn_prefix}.to_k.{lora_key}.weight"] = sample_k
+                        converted_state_dict[f"{attn_prefix}.to_v.{lora_key}.weight"] = sample_v
+                    else:
+                        converted_state_dict[f"{attn_prefix}.add_q_proj.{lora_key}.weight"] = sample_q
+                        converted_state_dict[f"{attn_prefix}.add_k_proj.{lora_key}.weight"] = sample_k
+                        converted_state_dict[f"{attn_prefix}.add_v_proj.{lora_key}.weight"] = sample_v
+
+        proj_mappings = [
+            ("img_attn.proj", "attn.to_out.0"),
+            ("txt_attn.proj", "attn.to_add_out"),
+        ]
+        for org_proj, diff_proj in proj_mappings:
+            for lora_key in lora_keys:
+                original_key = f"double_blocks.{dl}.{org_proj}.{lora_key}.weight"
+                if original_key in original_state_dict:
+                    converted_state_dict[f"{transformer_block_prefix}.{diff_proj}.{lora_key}.weight"] = (
+                        original_state_dict.pop(original_key)
+                    )
+
+        mlp_mappings = [
+            ("img_mlp.0", "ff.linear_in"),
+            ("img_mlp.2", "ff.linear_out"),
+            ("txt_mlp.0", "ff_context.linear_in"),
+            ("txt_mlp.2", "ff_context.linear_out"),
+        ]
+        for org_mlp, diff_mlp in mlp_mappings:
+            for lora_key in lora_keys:
+                original_key = f"double_blocks.{dl}.{org_mlp}.{lora_key}.weight"
+                if original_key in original_state_dict:
+                    converted_state_dict[f"{transformer_block_prefix}.{diff_mlp}.{lora_key}.weight"] = (
+                        original_state_dict.pop(original_key)
+                    )
+
+    extra_mappings = {
+        "img_in": "x_embedder",
+        "txt_in": "context_embedder",
+        "time_in.in_layer": "time_guidance_embed.timestep_embedder.linear_1",
+        "time_in.out_layer": "time_guidance_embed.timestep_embedder.linear_2",
+        "final_layer.linear": "proj_out",
+        "final_layer.adaLN_modulation.1": "norm_out.linear",
+        "single_stream_modulation.lin": "single_stream_modulation.linear",
+        "double_stream_modulation_img.lin": "double_stream_modulation_img.linear",
+        "double_stream_modulation_txt.lin": "double_stream_modulation_txt.linear",
+    }
+    for org_key, diff_key in extra_mappings.items():
+        for lora_key in lora_keys:
+            original_key = f"{org_key}.{lora_key}.weight"
+            if original_key in original_state_dict:
+                converted_state_dict[f"{diff_key}.{lora_key}.weight"] = original_state_dict.pop(original_key)
+
+    # Ignore alpha and known metadata-ish keys that are not needed for PEFT injection.
+    leftovers = [k for k in original_state_dict.keys() if ".alpha" not in k]
+    if leftovers:
+        raise ValueError(f"Unconverted Flux2/Klein LoRA keys remain: {leftovers[:8]}")
+
+    converted_state_dict = {f"transformer.{k}": v for k, v in converted_state_dict.items()}
+    return converted_state_dict
+
 def _load_lora_with_target_module_fallback(pipeline, lora_path, adapter_name, lora_scale):
     """
     Load a LoRA adapter and retry without adapter metadata when PEFT target module
@@ -342,6 +486,10 @@ def _load_lora_with_target_module_fallback(pipeline, lora_path, adapter_name, lo
             state_dict = state_payload[0]
         else:
             state_dict = state_payload
+
+        if _looks_like_flux2_klein_lora(state_dict):
+            print("Detected Flux2/Klein LoRA format; converting keys for Z-Image transformer.")
+            state_dict = _convert_flux2_klein_lora_to_diffusers(state_dict)
 
         pipeline.load_lora_into_transformer(
             state_dict=state_dict,
