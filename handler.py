@@ -315,6 +315,44 @@ def download_lora(url):
             f.write(chunk)
     return local_path
 
+def _load_lora_with_target_module_fallback(pipeline, lora_path, adapter_name, lora_scale):
+    """
+    Load a LoRA adapter and retry without adapter metadata when PEFT target module
+    names in metadata don't match the current Z-Image transformer module names.
+    """
+    try:
+        pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
+    except Exception as e:
+        message = str(e)
+        target_module_mismatch = "Target modules" in message and "not found in the base model" in message
+        if not target_module_mismatch:
+            raise
+
+        if not hasattr(pipeline, "lora_state_dict") or not hasattr(pipeline, "load_lora_into_transformer"):
+            raise
+
+        print(
+            "LoRA metadata target module mismatch detected; retrying without metadata "
+            f"(adapter='{adapter_name}')."
+        )
+        pipeline.unload_lora_weights()
+
+        state_payload = pipeline.lora_state_dict(lora_path, return_lora_metadata=True)
+        if isinstance(state_payload, tuple):
+            state_dict = state_payload[0]
+        else:
+            state_dict = state_payload
+
+        pipeline.load_lora_into_transformer(
+            state_dict=state_dict,
+            transformer=pipeline.transformer,
+            adapter_name=adapter_name,
+            metadata=None,
+            _pipeline=pipeline,
+        )
+
+    pipeline.set_adapters([adapter_name], adapter_weights=[lora_scale])
+
 def handler(job):
     """
     The main RunPod serverless handler.
@@ -416,11 +454,11 @@ def handler(job):
         if lora_url:
             lora_path = download_lora(lora_url)
             print(f"Loading LoRA from {lora_path} with scale {lora_scale}")
-            pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
-            pipeline.set_adapters([adapter_name], adapter_weights=[lora_scale])
+            _load_lora_with_target_module_fallback(pipeline, lora_path, adapter_name, lora_scale)
             if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
-                img2img_pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
-                img2img_pipeline.set_adapters([adapter_name], adapter_weights=[lora_scale])
+                _load_lora_with_target_module_fallback(
+                    img2img_pipeline, lora_path, adapter_name, lora_scale
+                )
             print(f"LoRA '{adapter_name}' loaded successfully.")
 
         # 4. Generate Image
