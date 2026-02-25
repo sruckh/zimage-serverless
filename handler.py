@@ -6,6 +6,8 @@ import torch
 import requests
 import uuid
 import traceback
+import sys
+import types
 from PIL import Image
 from diffusers import ZImagePipeline, ZImageImg2ImgPipeline, FlowMatchEulerDiscreteScheduler
 from s3_utils import upload_image_to_s3
@@ -111,6 +113,19 @@ def get_upscaler():
     if upscaler is None:
         if not os.path.exists(UPSCALE_MODEL_PATH):
             _download_file(UPSCALE_MODEL_URL, UPSCALE_MODEL_PATH)
+
+        # basicsr/realesrgan may import `torchvision.transforms.functional_tensor`,
+        # which was removed in newer torchvision releases.
+        if "torchvision.transforms.functional_tensor" not in sys.modules:
+            try:
+                import torchvision.transforms.functional_tensor  # noqa: F401
+            except ModuleNotFoundError:
+                import torchvision.transforms.functional as tvf
+
+                shim = types.ModuleType("torchvision.transforms.functional_tensor")
+                shim.__dict__["rgb_to_grayscale"] = tvf.rgb_to_grayscale
+                shim.__dict__["__getattr__"] = lambda name: getattr(tvf, name)
+                sys.modules["torchvision.transforms.functional_tensor"] = shim
 
         # Lazy import to avoid startup overhead when second pass is disabled.
         from basicsr.archs.rrdbnet_arch import RRDBNet
