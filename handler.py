@@ -3,11 +3,10 @@ t_start = time.time()
 import runpod
 import os
 import torch
+from torch import nn
 import requests
 import uuid
 import traceback
-import sys
-import types
 from PIL import Image
 from diffusers import ZImagePipeline, ZImageImg2ImgPipeline, FlowMatchEulerDiscreteScheduler
 from s3_utils import upload_image_to_s3
@@ -35,6 +34,90 @@ UPSCALE_MODEL_PATH = os.environ.get(
     "UPSCALE_MODEL_PATH",
     "/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth",
 )
+
+class DCCM(nn.Sequential):
+    def __init__(self, dim: int):
+        super().__init__(
+            nn.Conv2d(dim, dim * 2, 3, 1, 1),
+            nn.Mish(),
+            nn.Conv2d(dim * 2, dim, 3, 1, 1),
+        )
+
+class PLKConv2d(nn.Module):
+    def __init__(self, dim: int, kernel_size: int):
+        super().__init__()
+        self.conv = nn.Conv2d(dim, dim, kernel_size, 1, kernel_size // 2)
+        self.idx = dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            x1, x2 = torch.split(x, [self.idx, x.size(1) - self.idx], dim=1)
+            x1 = self.conv(x1)
+            return torch.cat([x1, x2], dim=1)
+        x[:, : self.idx] = self.conv(x[:, : self.idx])
+        return x
+
+class EA(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.f = nn.Sequential(nn.Conv2d(dim, dim, 3, 1, 1), nn.Sigmoid())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * self.f(x)
+
+class PLKBlock(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        kernel_size: int,
+        split_ratio: float,
+        norm_groups: int,
+        use_ea: bool = True,
+    ):
+        super().__init__()
+        self.channel_mixer = DCCM(dim)
+        pdim = int(dim * split_ratio)
+        self.lk = PLKConv2d(pdim, kernel_size)
+        self.attn = EA(dim) if use_ea else nn.Identity()
+        self.refine = nn.Conv2d(dim, dim, 1, 1, 0)
+        self.norm = nn.GroupNorm(norm_groups, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_skip = x
+        x = self.channel_mixer(x)
+        x = self.lk(x)
+        x = self.attn(x)
+        x = self.refine(x)
+        x = self.norm(x)
+        return x + x_skip
+
+class RealPLKSR(nn.Module):
+    def __init__(
+        self,
+        in_ch: int = 3,
+        out_ch: int = 3,
+        dim: int = 64,
+        n_blocks: int = 28,
+        upscaling_factor: int = 4,
+        kernel_size: int = 17,
+        split_ratio: float = 0.25,
+        use_ea: bool = True,
+        norm_groups: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.upscale = upscaling_factor
+        self.feats = nn.Sequential(
+            *[nn.Conv2d(in_ch, dim, 3, 1, 1)]
+            + [PLKBlock(dim, kernel_size, split_ratio, norm_groups, use_ea) for _ in range(n_blocks)]
+            + [nn.Dropout2d(dropout)]
+            + [nn.Conv2d(dim, out_ch * upscaling_factor**2, 3, 1, 1)]
+        )
+        self.to_img = nn.PixelShuffle(upscaling_factor)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.feats(x) + torch.repeat_interleave(x, repeats=self.upscale**2, dim=1)
+        return self.to_img(x)
 
 def _to_bool(value, default=False):
     if value is None:
@@ -113,47 +196,111 @@ def get_upscaler():
     if upscaler is None:
         if not os.path.exists(UPSCALE_MODEL_PATH):
             _download_file(UPSCALE_MODEL_URL, UPSCALE_MODEL_PATH)
+        loadnet = torch.load(UPSCALE_MODEL_PATH, map_location="cpu")
+        if isinstance(loadnet, dict):
+            if "params_ema" in loadnet and isinstance(loadnet["params_ema"], dict):
+                state_dict = loadnet["params_ema"]
+            elif "params" in loadnet and isinstance(loadnet["params"], dict):
+                state_dict = loadnet["params"]
+            elif "state_dict" in loadnet and isinstance(loadnet["state_dict"], dict):
+                state_dict = loadnet["state_dict"]
+            else:
+                nested_dicts = [v for v in loadnet.values() if isinstance(v, dict)]
+                matched = None
+                for candidate in nested_dicts:
+                    if "feats.0.weight" in candidate:
+                        matched = candidate
+                        break
+                state_dict = matched if matched is not None else loadnet
+        else:
+            state_dict = loadnet
 
-        # basicsr/realesrgan may import `torchvision.transforms.functional_tensor`,
-        # which was removed in newer torchvision releases.
-        if "torchvision.transforms.functional_tensor" not in sys.modules:
-            try:
-                import torchvision.transforms.functional_tensor  # noqa: F401
-            except ModuleNotFoundError:
-                import torchvision.transforms.functional as tvf
+        if not isinstance(state_dict, dict) or "feats.0.weight" not in state_dict:
+            raise RuntimeError(
+                "Upscaler checkpoint is not a supported RealPLKSR-style state dict."
+            )
 
-                shim = types.ModuleType("torchvision.transforms.functional_tensor")
-                shim.__dict__["rgb_to_grayscale"] = tvf.rgb_to_grayscale
-                shim.__dict__["__getattr__"] = lambda name: getattr(tvf, name)
-                sys.modules["torchvision.transforms.functional_tensor"] = shim
+        # Remove common wrappers like `module.`
+        if any(k.startswith("module.") for k in state_dict.keys()):
+            state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
 
-        # Lazy import to avoid startup overhead when second pass is disabled.
-        from basicsr.archs.rrdbnet_arch import RRDBNet
-        from realesrgan import RealESRGANer
+        dim = int(state_dict["feats.0.weight"].shape[0])
+        n_blocks = len([k for k in state_dict.keys() if k.startswith("feats.") and k.endswith(".channel_mixer.0.weight")])
+        kernel_size = int(state_dict["feats.1.lk.conv.weight"].shape[2])
+        split_ratio = float(state_dict["feats.1.lk.conv.weight"].shape[0]) / float(dim)
+        use_ea = "feats.1.attn.f.0.weight" in state_dict
 
-        model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-        upscaler = RealESRGANer(
-            scale=4,
-            model_path=UPSCALE_MODEL_PATH,
-            model=model,
-            tile=0,
-            tile_pad=10,
-            pre_pad=0,
-            half=True,
+        feat_weight_indices = []
+        for key in state_dict.keys():
+            if key.startswith("feats.") and key.endswith(".weight"):
+                try:
+                    feat_weight_indices.append(int(key.split(".")[1]))
+                except Exception:
+                    pass
+        if not feat_weight_indices:
+            raise RuntimeError("Could not infer output conv index from upscaler checkpoint.")
+        last_feat_idx = max(feat_weight_indices)
+        out_channels = int(state_dict[f"feats.{last_feat_idx}.weight"].shape[0])
+        scale = int((out_channels // 3) ** 0.5)
+
+        model = RealPLKSR(
+            in_ch=3,
+            out_ch=3,
+            dim=dim,
+            n_blocks=n_blocks,
+            upscaling_factor=scale,
+            kernel_size=kernel_size,
+            split_ratio=split_ratio,
+            use_ea=use_ea,
+            norm_groups=4,
         )
-        print("RealESRGAN upscaler initialized.")
+        try:
+            model.load_state_dict(state_dict, strict=True)
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"Failed to load RealPLKSR upscaler checkpoint with strict key matching: {e}"
+            ) from e
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = model.to(device).eval()
+        if device.type == "cuda":
+            model = model.half()
+        upscaler = {
+            "model": model,
+            "scale": scale,
+            "device": device,
+            "half": device.type == "cuda",
+        }
+        print(f"RealPLKSR upscaler initialized (scale={scale}, device={device.type}).")
     return upscaler
 
 def upscale_image(image, outscale):
-    import cv2
     import numpy as np
 
     upsampler = get_upscaler()
-    rgb = np.array(image.convert("RGB"))
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    out_bgr, _ = upsampler.enhance(bgr, outscale=outscale)
-    out_rgb = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(out_rgb)
+    model = upsampler["model"]
+    model_scale = float(upsampler["scale"])
+    device = upsampler["device"]
+    use_half = bool(upsampler["half"])
+
+    rgb = np.array(image.convert("RGB")).astype(np.float32) / 255.0
+    tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).to(device)
+    if use_half:
+        tensor = tensor.half()
+
+    with torch.inference_mode():
+        output = model(tensor).clamp(0, 1)
+    output = output.float().cpu().squeeze(0).permute(1, 2, 0).numpy()
+
+    target_w = int(round(image.width * outscale))
+    target_h = int(round(image.height * outscale))
+    native_w = int(round(image.width * model_scale))
+    native_h = int(round(image.height * model_scale))
+
+    out_img = Image.fromarray((output * 255.0).round().astype(np.uint8))
+    if (target_w, target_h) != (native_w, native_h):
+        out_img = out_img.resize((target_w, target_h), resample=Image.Resampling.LANCZOS)
+    return out_img
 
 def download_lora(url):
     """

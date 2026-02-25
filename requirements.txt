@@ -11,5 +11,4 @@ accelerate
 safetensors
 peft
 scipy
-realesrgan
 # Note: Flash attention remains in the bootstrap because it's hardware-specific

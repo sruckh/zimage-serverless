@@ -20,7 +20,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 --break-system-packages
 
 # 2. Install remaining utilities from standard PyPI
-RUN pip install --no-cache-dir runpod boto3 requests pillow diffusers transformers accelerate safetensors peft scipy realesrgan --break-system-packages
+RUN pip install --no-cache-dir runpod boto3 requests pillow diffusers transformers accelerate safetensors peft scipy --break-system-packages
 
 # Copy scripts into the container
 COPY runpod_bootstrap.sh .

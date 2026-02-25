@@ -9,7 +9,7 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 - **Z-Image Aligned Defaults:** Uses 50 steps with base-model aligned CFG defaults (`cfg_normalization=False`, `cfg_truncation=1.0`).
 - **Scheduler Control:** Supports `use_beta_sigmas` to toggle FlowMatch beta-sigma scheduling.
 - **Adaptive VAE Tiling:** Keeps VAE tiling off at 1024-ish outputs by default to reduce potential tile artifacts, while enabling it for larger images.
-- **Optional Two-Pass Refinement:** Upscales pass-1 output with RealESRGAN (`4xPurePhoto-RealPLSKR`) and runs a Z-Image img2img refinement pass for extra detail.
+- **Optional Two-Pass Refinement:** Upscales pass-1 output with the `4xPurePhoto-RealPLSKR` checkpoint and runs a Z-Image img2img refinement pass for extra detail.
 - **Dynamic LoRA Support:** Load LoRAs from any URL at runtime with automatic cleanup.
 - **S3 Integration:** Automatically uploads generated images to an S3-compatible bucket (configured for Backblaze B2).
 
@@ -27,7 +27,7 @@ Configure these variables in your RunPod Endpoint/Template:
 | `MODEL_ID` | HuggingFace Repo ID or local path | `Tongyi-MAI/Z-Image` |
 | `HF_TOKEN` | Optional. Hugging Face token for private models. | - |
 | `SECOND_PASS_DEFAULT_ENABLED` | Optional. Enables two-pass refinement by default. | `true` |
-| `UPSCALE_MODEL_URL` | Optional. URL for the RealESRGAN `.pth` model. | Starinspace 4xPurePhoto-RealPLSKR |
+| `UPSCALE_MODEL_URL` | Optional. URL for the upscaler `.pth` model. | Starinspace 4xPurePhoto-RealPLSKR |
 | `UPSCALE_MODEL_PATH` | Optional. Cached path for the upscaler model. | `/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth` |
 
 The bootstrap script now checks `UPSCALE_MODEL_PATH` on every start and downloads it once if missing, even when `.installed_v2` already exists.
@@ -58,7 +58,7 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `use_beta_sigmas` | Boolean | No | `True` | Rebuilds FlowMatch scheduler with beta sigmas for cleaner denoising. |
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling behavior (`auto`: on only for >1024×1024 area). |
 | `second_pass_enabled` | Boolean | No | env/default | Enables pass-2 upscale + img2img refinement. |
-| `second_pass_upscale` | Float | No | `2.0` | RealESRGAN outscale factor for pass 2 (2.0 = 2x). |
+| `second_pass_upscale` | Float | No | `2.0` | Output scale factor for pass 2 upscaling (2.0 = 2x). |
 | `second_pass_strength` | Float | No | `0.3` | Img2img strength for pass 2. |
 | `second_pass_steps` | Integer | No | `10` | Img2img denoising steps for pass 2. |
 | `second_pass_guidance_scale` | Float | No | `2.8` | CFG scale for pass 2. |
