@@ -29,6 +29,7 @@ Configure these variables in your RunPod Endpoint/Template:
 | `SECOND_PASS_DEFAULT_ENABLED` | Optional. Enables two-pass refinement by default. | `true` |
 | `UPSCALE_MODEL_URL` | Optional. URL for the upscaler `.pth` model. | Starinspace 4xPurePhoto-RealPLSKR |
 | `UPSCALE_MODEL_PATH` | Optional. Cached path for the upscaler model. | `/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth` |
+| `UPSCALE_USE_CUDA` | Optional. Runs the RealPLKSR upscaler on CUDA when `true`; CPU by default to reduce VRAM pressure. | `false` |
 
 The bootstrap script now checks `UPSCALE_MODEL_PATH` on every start and downloads it once if missing, even when `.installed_v2` already exists.
 
@@ -58,10 +59,10 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `use_beta_sigmas` | Boolean | No | `True` | Rebuilds FlowMatch scheduler with beta sigmas for cleaner denoising. |
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling behavior (`auto`: on only for >1024×1024 area). |
 | `second_pass_enabled` | Boolean | No | env/default | Enables pass-2 upscale + img2img refinement. |
-| `second_pass_upscale` | Float | No | `2.0` | Output scale factor for pass 2 upscaling (2.0 = 2x). |
-| `second_pass_strength` | Float | No | `0.3` | Img2img strength for pass 2. |
-| `second_pass_steps` | Integer | No | `10` | Img2img denoising steps for pass 2. |
-| `second_pass_guidance_scale` | Float | No | `2.8` | CFG scale for pass 2. |
+| `second_pass_upscale` | Float | No | `1.5` | Output scale factor for pass 2 upscaling (1.5x default to reduce VRAM). |
+| `second_pass_strength` | Float | No | `0.18` | Img2img strength for pass 2 (lower default to preserve LoRA likeness). |
+| `second_pass_steps` | Integer | No | `8` | Img2img denoising steps for pass 2. |
+| `second_pass_guidance_scale` | Float | No | `1.2` | CFG scale for pass 2 (lower default to avoid over-rewrite). |
 | `second_pass_seed` | Integer | No | `seed` | Seed for pass 2 reproducibility. |
 | `second_pass_cfg_normalization` | Boolean | No | `False` | CFG normalization toggle for pass 2. |
 | `second_pass_cfg_truncation` | Float | No | `1.0` | CFG truncation for pass 2. |

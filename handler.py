@@ -2,6 +2,7 @@ import time
 t_start = time.time()
 import runpod
 import os
+import gc
 import torch
 from torch import nn
 import requests
@@ -34,6 +35,7 @@ UPSCALE_MODEL_PATH = os.environ.get(
     "UPSCALE_MODEL_PATH",
     "/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth",
 )
+UPSCALE_USE_CUDA_ENV = os.environ.get("UPSCALE_USE_CUDA")
 
 class DCCM(nn.Sequential):
     def __init__(self, dim: int):
@@ -153,6 +155,18 @@ def _configure_scheduler(pipeline, use_beta_sigmas):
             f"(keeping model default): {repr(e)}"
         )
 
+def _free_cuda_cache(stage_label=None):
+    if not torch.cuda.is_available():
+        return
+    gc.collect()
+    torch.cuda.empty_cache()
+    try:
+        torch.cuda.ipc_collect()
+    except Exception:
+        pass
+    if stage_label:
+        print(f"Cleared CUDA cache at stage: {stage_label}")
+
 def _download_file(url, destination_path):
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
     tmp_path = f"{destination_path}.tmp_{uuid.uuid4().hex}"
@@ -261,7 +275,8 @@ def get_upscaler():
                 f"Failed to load RealPLKSR upscaler checkpoint with strict key matching: {e}"
             ) from e
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        use_cuda_for_upscaler = _to_bool(UPSCALE_USE_CUDA_ENV, default=False) and torch.cuda.is_available()
+        device = torch.device("cuda" if use_cuda_for_upscaler else "cpu")
         model = model.to(device).eval()
         if device.type == "cuda":
             model = model.half()
@@ -537,10 +552,10 @@ def handler(job):
             job_input.get("second_pass_enabled"),
             default=second_pass_enabled_default,
         )
-        second_pass_upscale = float(job_input.get("second_pass_upscale", 2.0))
-        second_pass_strength = float(job_input.get("second_pass_strength", 0.3))
-        second_pass_steps = int(job_input.get("second_pass_steps", 10))
-        second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 2.8))
+        second_pass_upscale = float(job_input.get("second_pass_upscale", 1.5))
+        second_pass_strength = float(job_input.get("second_pass_strength", 0.18))
+        second_pass_steps = int(job_input.get("second_pass_steps", 8))
+        second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 1.2))
         second_pass_seed = int(job_input.get("second_pass_seed", seed))
         second_pass_cfg_normalization = _to_bool(
             job_input.get("second_pass_cfg_normalization"),
@@ -634,6 +649,7 @@ def handler(job):
                 f"steps={second_pass_steps}, guidance={second_pass_guidance_scale})"
             )
             upscaled_image = upscale_image(result, second_pass_upscale)
+            _free_cuda_cache("before_second_pass_img2img")
             second_generator = torch.Generator("cuda").manual_seed(second_pass_seed)
             result = img2img_pipeline(
                 prompt=prompt,
