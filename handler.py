@@ -583,6 +583,9 @@ def handler(job):
             default=False,
         )
         second_pass_cfg_truncation = float(job_input.get("second_pass_cfg_truncation", 1.0))
+        second_pass_max_sequence_length = int(
+            job_input.get("second_pass_max_sequence_length", min(max_sequence_length, 384))
+        )
         second_pass_use_beta_sigmas = _to_optional_bool(job_input.get("second_pass_use_beta_sigmas"))
         if second_pass_use_beta_sigmas is None:
             second_pass_use_beta_sigmas = use_beta_sigmas
@@ -596,9 +599,10 @@ def handler(job):
 
         second_pass_vae_tiling_input = job_input.get("second_pass_vae_tiling")
         if second_pass_vae_tiling_input is None:
-            second_pass_vae_tiling = (width * height * (second_pass_upscale ** 2)) > (1024 * 1024)
+            second_pass_vae_tiling = True
         else:
             second_pass_vae_tiling = _to_bool(second_pass_vae_tiling_input, default=True)
+        second_pass_vae_slicing = _to_bool(job_input.get("second_pass_vae_slicing"), default=True)
         
         # Generate a unique adapter name for this request to avoid PEFT collisions
         request_id = str(uuid.uuid4())[:8]
@@ -622,10 +626,17 @@ def handler(job):
                 img2img_pipeline.vae.enable_tiling()
             else:
                 img2img_pipeline.vae.disable_tiling()
+            if second_pass_vae_slicing:
+                img2img_pipeline.vae.enable_slicing()
+            else:
+                img2img_pipeline.vae.disable_slicing()
         print(
             f"Inference controls: use_beta_sigmas={use_beta_sigmas}, "
             f"cfg_normalization={cfg_normalization}, cfg_truncation={cfg_truncation}, "
-            f"vae_tiling={vae_tiling}, second_pass_enabled={second_pass_enabled}"
+            f"vae_tiling={vae_tiling}, second_pass_enabled={second_pass_enabled}, "
+            f"second_pass_vae_tiling={second_pass_vae_tiling}, "
+            f"second_pass_vae_slicing={second_pass_vae_slicing}, "
+            f"second_pass_max_sequence_length={second_pass_max_sequence_length}"
         )
         
         # 3. Handle LoRA - Clean start every time to prevent artifacts and "smearing"
@@ -682,7 +693,7 @@ def handler(job):
                 guidance_scale=second_pass_guidance_scale,
                 cfg_normalization=second_pass_cfg_normalization,
                 cfg_truncation=second_pass_cfg_truncation,
-                max_sequence_length=max_sequence_length,
+                max_sequence_length=second_pass_max_sequence_length,
                 generator=second_generator,
             ).images[0]
 

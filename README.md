@@ -66,8 +66,10 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `second_pass_seed` | Integer | No | `seed` | Seed for pass 2 reproducibility. |
 | `second_pass_cfg_normalization` | Boolean | No | `False` | CFG normalization toggle for pass 2. |
 | `second_pass_cfg_truncation` | Float | No | `1.0` | CFG truncation for pass 2. |
+| `second_pass_max_sequence_length`| Integer | No | `min(max_sequence_length, 384)` | Token limit for pass-2 refinement to reduce VRAM pressure. |
 | `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Scheduler beta-sigma toggle for pass 2. |
-| `second_pass_vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling for pass 2. |
+| `second_pass_vae_tiling` | Boolean | No | `True` | VAE tiling for pass 2 (enabled by default for memory headroom). |
+| `second_pass_vae_slicing` | Boolean | No | `True` | VAE slicing for pass 2 (enabled by default for memory headroom). |
 | `adapter_name` | String | No | - | Unique ID (auto-generated if not provided). |
 
 ### Example Request Body
