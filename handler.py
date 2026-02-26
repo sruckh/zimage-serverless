@@ -165,8 +165,7 @@ def _resolve_use_beta_sigmas(job_input_value):
     Resolve use_beta_sigmas with precedence:
     1) request input
     2) USE_BETA_SIGMAS env var
-    3) model scheduler default (no override)
-    Returns bool or None (None means keep scheduler as loaded from model config).
+    3) default True
     """
     if job_input_value is not None:
         return _to_bool(job_input_value, default=False)
@@ -175,7 +174,7 @@ def _resolve_use_beta_sigmas(job_input_value):
     if env_raw is not None:
         return _to_bool(env_raw, default=False)
 
-    return None
+    return True
 
 def _free_cuda_cache(stage_label=None):
     if not torch.cuda.is_available():
@@ -564,8 +563,8 @@ def handler(job):
         cfg_truncation = float(job_input.get("cfg_truncation", 1.0))
         max_sequence_length = int(job_input.get("max_sequence_length", 512))
 
-        # By default, keep scheduler behavior from model config.
         # Request/env can explicitly force beta-sigma on/off.
+        # Default behavior is beta-sigmas enabled.
         use_beta_sigmas = _resolve_use_beta_sigmas(job_input.get("use_beta_sigmas"))
 
         # Optional second-pass refinement: upscale + Z-Image img2img
