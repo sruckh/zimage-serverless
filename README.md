@@ -56,7 +56,7 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `max_sequence_length`| Integer | No | `512` | Token limit for long prompts. |
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |
 | `lora_scale` | Float | No | `0.85` | Strength of the LoRA adapter (0.8-0.9 recommended). |
-| `use_beta_sigmas` | Boolean | No | `True` | Rebuilds FlowMatch scheduler with beta sigmas for cleaner denoising. |
+| `use_beta_sigmas` | Boolean | No | model default | Explicitly rebuilds FlowMatch scheduler with/without beta sigmas. If omitted, uses scheduler config from the loaded model. |
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling behavior (`auto`: on only for >1024×1024 area). |
 | `second_pass_enabled` | Boolean | No | env/default | Enables pass-2 upscale + img2img refinement. |
 | `second_pass_upscale` | Float | No | `1.5` | Output scale factor for pass 2 upscaling (1.5x default to reduce VRAM). |
@@ -66,7 +66,7 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `second_pass_seed` | Integer | No | `seed` | Seed for pass 2 reproducibility. |
 | `second_pass_cfg_normalization` | Boolean | No | `False` | CFG normalization toggle for pass 2. |
 | `second_pass_cfg_truncation` | Float | No | `1.0` | CFG truncation for pass 2. |
-| `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Scheduler beta-sigma toggle for pass 2. |
+| `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Scheduler beta-sigma toggle for pass 2; omit to inherit pass-1 behavior/model default. |
 | `second_pass_vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling for pass 2. |
 | `adapter_name` | String | No | - | Unique ID (auto-generated if not provided). |
 

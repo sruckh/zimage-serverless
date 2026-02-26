@@ -136,6 +136,11 @@ def _to_bool(value, default=False):
             return False
     return default
 
+def _to_optional_bool(value):
+    if value is None:
+        return None
+    return _to_bool(value, default=False)
+
 def _configure_scheduler(pipeline, use_beta_sigmas):
     """
     Rebuild scheduler from the loaded model config while optionally enabling beta sigmas.
@@ -154,6 +159,23 @@ def _configure_scheduler(pipeline, use_beta_sigmas):
             f"Warning: could not configure scheduler use_beta_sigmas={use_beta_sigmas} "
             f"(keeping model default): {repr(e)}"
         )
+
+def _resolve_use_beta_sigmas(job_input_value):
+    """
+    Resolve use_beta_sigmas with precedence:
+    1) request input
+    2) USE_BETA_SIGMAS env var
+    3) model scheduler default (no override)
+    Returns bool or None (None means keep scheduler as loaded from model config).
+    """
+    if job_input_value is not None:
+        return _to_bool(job_input_value, default=False)
+
+    env_raw = os.environ.get("USE_BETA_SIGMAS")
+    if env_raw is not None:
+        return _to_bool(env_raw, default=False)
+
+    return None
 
 def _free_cuda_cache(stage_label=None):
     if not torch.cuda.is_available():
@@ -542,9 +564,9 @@ def handler(job):
         cfg_truncation = float(job_input.get("cfg_truncation", 1.0))
         max_sequence_length = int(job_input.get("max_sequence_length", 512))
 
-        # Enable beta-sigmas by default for cleaner denoising schedule; can be overridden per request.
-        env_use_beta_sigmas = _to_bool(os.environ.get("USE_BETA_SIGMAS"), default=True)
-        use_beta_sigmas = _to_bool(job_input.get("use_beta_sigmas"), default=env_use_beta_sigmas)
+        # By default, keep scheduler behavior from model config.
+        # Request/env can explicitly force beta-sigma on/off.
+        use_beta_sigmas = _resolve_use_beta_sigmas(job_input.get("use_beta_sigmas"))
 
         # Optional second-pass refinement: upscale + Z-Image img2img
         second_pass_enabled_default = _to_bool(os.environ.get("SECOND_PASS_DEFAULT_ENABLED"), default=True)
@@ -562,10 +584,9 @@ def handler(job):
             default=False,
         )
         second_pass_cfg_truncation = float(job_input.get("second_pass_cfg_truncation", 1.0))
-        second_pass_use_beta_sigmas = _to_bool(
-            job_input.get("second_pass_use_beta_sigmas"),
-            default=use_beta_sigmas,
-        )
+        second_pass_use_beta_sigmas = _to_optional_bool(job_input.get("second_pass_use_beta_sigmas"))
+        if second_pass_use_beta_sigmas is None:
+            second_pass_use_beta_sigmas = use_beta_sigmas
 
         # Keep VAE tiling off at 1024-ish outputs unless explicitly requested.
         vae_tiling_input = job_input.get("vae_tiling")
@@ -587,9 +608,11 @@ def handler(job):
         # 2. Setup Pipeline
         pipeline = get_pipeline()
         img2img_pipeline = get_img2img_pipeline() if second_pass_enabled else None
-        _configure_scheduler(pipeline, use_beta_sigmas)
+        if use_beta_sigmas is not None:
+            _configure_scheduler(pipeline, use_beta_sigmas)
         if img2img_pipeline is not None:
-            _configure_scheduler(img2img_pipeline, second_pass_use_beta_sigmas)
+            if second_pass_use_beta_sigmas is not None:
+                _configure_scheduler(img2img_pipeline, second_pass_use_beta_sigmas)
 
         if vae_tiling:
             pipeline.vae.enable_tiling()
