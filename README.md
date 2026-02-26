@@ -6,7 +6,7 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
-- **Z-Image Aligned Defaults:** Uses 50 steps with base-model aligned CFG defaults (`cfg_normalization=False`, `cfg_truncation=1.0`).
+- **Photorealism-Oriented Defaults:** Uses 50 steps with realism-leaning CFG defaults (`cfg_normalization=True`, `cfg_truncation=1.0`).
 - **Scheduler Control:** Supports `use_beta_sigmas` to toggle FlowMatch beta-sigma scheduling.
 - **Adaptive VAE Tiling:** Keeps VAE tiling off at 1024-ish outputs by default to reduce potential tile artifacts, while enabling it for larger images.
 - **Optional Two-Pass Refinement:** Upscales pass-1 output with the `4xPurePhoto-RealPLSKR` checkpoint and runs a Z-Image img2img refinement pass for extra detail.
@@ -51,7 +51,7 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `height` | Integer | No | `1024` | Image height. |
 | `steps` | Integer | No | `50` | Number of inference steps. |
 | `guidance_scale` | Float | No | `3.0` | CFG scale (3.0-4.5 recommended for likeness). |
-| `cfg_normalization`| Boolean | No | `False` | Z-Image base default behavior. |
+| `cfg_normalization`| Boolean | No | `True` | CFG normalization toggle (enabled by default for photorealism). |
 | `cfg_truncation` | Float | No | `1.0` | 1.0 recommended; lower to fix over-saturation. |
 | `max_sequence_length`| Integer | No | `512` | Token limit for long prompts. |
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |

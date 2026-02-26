@@ -558,8 +558,8 @@ def handler(job):
         seed = int(job_input.get("seed", 42))
         lora_scale = float(job_input.get("lora_scale", 0.85))
 
-        # Z-Image base defaults from official docs: cfg_normalization=False, cfg_truncation=1.0
-        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=False)
+        # Use cfg_normalization=True by default for more photorealistic rendering.
+        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=True)
         cfg_truncation = float(job_input.get("cfg_truncation", 1.0))
         max_sequence_length = int(job_input.get("max_sequence_length", 512))
 
