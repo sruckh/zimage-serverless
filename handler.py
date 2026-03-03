@@ -8,6 +8,7 @@ from torch import nn
 import requests
 import uuid
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 from diffusers import ZImagePipeline, ZImageImg2ImgPipeline, FlowMatchEulerDiscreteScheduler
 from s3_utils import upload_image_to_s3
@@ -495,10 +496,13 @@ def _convert_flux2_klein_lora_to_diffusers(state_dict):
     converted_state_dict = {f"transformer.{k}": v for k, v in converted_state_dict.items()}
     return converted_state_dict
 
-def _load_lora_with_target_module_fallback(pipeline, lora_path, adapter_name, lora_scale):
+def _load_lora(pipeline, lora_path, adapter_name):
     """
-    Load a LoRA adapter and retry without adapter metadata when PEFT target module
-    names in metadata don't match the current Z-Image transformer module names.
+    Load a single LoRA adapter onto the pipeline by adapter_name.
+    Does NOT activate it — call _activate_loras() after all LoRAs are loaded.
+
+    Retries without adapter metadata when PEFT target module names in metadata
+    don't match the current Z-Image transformer module names (Flux2/Klein format).
     """
     try:
         pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
@@ -535,7 +539,19 @@ def _load_lora_with_target_module_fallback(pipeline, lora_path, adapter_name, lo
             _pipeline=pipeline,
         )
 
-    pipeline.set_adapters([adapter_name], adapter_weights=[lora_scale])
+
+def _activate_loras(pipeline, adapter_names, adapter_scales):
+    """
+    Activate one or more loaded LoRA adapters with their respective scales.
+    Must be called after all _load_lora() calls are complete.
+
+    With a single LoRA this is equivalent to set_adapters([name], [scale]).
+    With multiple LoRAs the cat-method blending applies:
+        h = W0·x + sum(scale_i * alpha_i/rank_i * B_i·A_i·x)
+    Weights are independent multipliers — not normalised — so [1.0, 0.25]
+    gives a true 4:1 influence ratio (assuming equal internal scalings).
+    """
+    pipeline.set_adapters(adapter_names, adapter_weights=adapter_scales)
 
 def handler(job):
     """
@@ -549,14 +565,25 @@ def handler(job):
         if not prompt:
             return {"error": "Missing 'prompt' in input."}
 
+        # Multi-LoRA input: prefer `loras` array; fall back to legacy lora_url/lora_scale.
+        # loras format: [{"url": "https://...", "scale": 1.0}, ...]
+        # scale is optional per entry (defaults to 0.85). 0 or 1 entries are fine.
+        loras_raw = job_input.get("loras")
         lora_url = job_input.get("lora_url")
+        lora_scale = float(job_input.get("lora_scale", 0.85))
+        if loras_raw is not None:
+            lora_list = [{"url": str(e["url"]), "scale": float(e.get("scale", 0.85))} for e in loras_raw]
+        elif lora_url:
+            lora_list = [{"url": lora_url, "scale": lora_scale}]
+        else:
+            lora_list = []
+
         negative_prompt = job_input.get("negative_prompt", "")
         width = int(job_input.get("width", 1024))
         height = int(job_input.get("height", 1024))
         steps = int(job_input.get("steps", 50))
         guidance_scale = float(job_input.get("guidance_scale", 3.5))
         seed = int(job_input.get("seed", 42))
-        lora_scale = float(job_input.get("lora_scale", 0.85))
 
         # Use cfg_normalization=True by default for more photorealistic rendering.
         cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=True)
@@ -604,9 +631,8 @@ def handler(job):
             second_pass_vae_tiling = _to_bool(second_pass_vae_tiling_input, default=True)
         second_pass_vae_slicing = _to_bool(job_input.get("second_pass_vae_slicing"), default=True)
         
-        # Generate a unique adapter name for this request to avoid PEFT collisions
+        # Unique prefix for this request's adapter names to avoid PEFT collisions
         request_id = str(uuid.uuid4())[:8]
-        adapter_name = job_input.get("adapter_name", f"adapter_{request_id}")
 
         # 2. Setup Pipeline
         pipeline = get_pipeline()
@@ -645,17 +671,46 @@ def handler(job):
         pipeline.unload_lora_weights()
         if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
             img2img_pipeline.unload_lora_weights()
-        
-        lora_path = None
-        if lora_url:
-            lora_path = download_lora(lora_url)
-            print(f"Loading LoRA from {lora_path} with scale {lora_scale}")
-            _load_lora_with_target_module_fallback(pipeline, lora_path, adapter_name, lora_scale)
+
+        # Assign stable adapter names for this request
+        lora_entries = [
+            {
+                "url": lora["url"],
+                "scale": lora["scale"],
+                "name": f"adapter_{request_id}_{i}",
+                "path": None,
+            }
+            for i, lora in enumerate(lora_list)
+        ]
+
+        if lora_entries:
+            # Download all LoRAs in parallel — each to its own /tmp file
+            def _download(entry):
+                entry["path"] = download_lora(entry["url"])
+                return entry
+
+            if len(lora_entries) == 1:
+                _download(lora_entries[0])
+            else:
+                with ThreadPoolExecutor(max_workers=len(lora_entries)) as pool:
+                    futures = {pool.submit(_download, e): e for e in lora_entries}
+                    for future in as_completed(futures):
+                        future.result()  # re-raises any download exception
+
+            # Load all LoRAs first, then activate in one set_adapters call
+            for entry in lora_entries:
+                print(f"Loading LoRA '{entry['name']}' from {entry['path']} (scale={entry['scale']})")
+                _load_lora(pipeline, entry["path"], entry["name"])
+                if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
+                    _load_lora(img2img_pipeline, entry["path"], entry["name"])
+
+            adapter_names = [e["name"] for e in lora_entries]
+            adapter_scales = [e["scale"] for e in lora_entries]
+            _activate_loras(pipeline, adapter_names, adapter_scales)
             if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
-                _load_lora_with_target_module_fallback(
-                    img2img_pipeline, lora_path, adapter_name, lora_scale
-                )
-            print(f"LoRA '{adapter_name}' loaded successfully.")
+                _activate_loras(img2img_pipeline, adapter_names, adapter_scales)
+
+            print(f"Loaded {len(lora_entries)} LoRA(s): {list(zip(adapter_names, adapter_scales))}")
 
         # 4. Generate Image
         generator = torch.Generator("cuda").manual_seed(seed)
@@ -708,8 +763,9 @@ def handler(job):
         print(f"Image uploaded to S3: {s3_url}")
 
         # 7. Cleanup (Ephemeral Storage)
-        if lora_path and os.path.exists(lora_path):
-            os.remove(lora_path)
+        for entry in lora_entries:
+            if entry["path"] and os.path.exists(entry["path"]):
+                os.remove(entry["path"])
         if os.path.exists(output_path):
             os.remove(output_path)
 
