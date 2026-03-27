@@ -11,7 +11,8 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 - **Scheduler Control:** Supports `use_beta_sigmas` to toggle FlowMatch beta-sigma scheduling and `shift` to adjust the composition/detail balance.
 - **Adaptive VAE Tiling:** Keeps VAE tiling off at 1024-ish outputs by default to reduce potential tile artifacts, while enabling it for larger images.
 - **Optional Two-Pass Refinement:** Upscales pass-1 output with the `4xPurePhoto-RealPLSKR` checkpoint and runs a Z-Image img2img refinement pass for extra detail.
-- **Dynamic Multi-LoRA Support:** Load one or more LoRAs from any URL at runtime. Multiple LoRAs are downloaded in parallel and blended by weight. Legacy single-LoRA inputs remain fully supported.
+- **Dynamic Multi-LoRA Support:** Load one or more LoRAs from any URL at runtime. Multiple LoRAs are downloaded in parallel and blended by weight. Legacy single-LoRA inputs remain fully supported. Handles multiple LoRA key formats (kohya, diffusers-native, Flux2/Klein) with automatic conversion and alpha-key patching.
+- **VRAM-Optimized:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set automatically to reduce allocator fragmentation. Second-pass upscale defaults to 1.25× to stay within 24 GB when LoRAs are loaded.
 - **S3 Integration:** Automatically uploads generated images to an S3-compatible bucket (configured for Backblaze B2).
 
 ## Environment Variables (RunPod Configuration)
@@ -74,6 +75,20 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Scheduler beta-sigma toggle for pass 2. |
 | `second_pass_vae_tiling` | Boolean | No | `True` | VAE tiling for pass 2 (enabled by default for memory headroom). |
 | `second_pass_vae_slicing` | Boolean | No | `True` | VAE slicing for pass 2 (enabled by default for memory headroom). |
+
+### LoRA URL Format
+
+LoRA URLs can point to any direct-download `.safetensors` file (Backblaze B2, presigned S3, etc.).
+
+**HuggingFace URLs:** Use the `/resolve/` path, **not** the `/blob/` path. The `/blob/` URL returns an HTML page viewer, not the binary file, and will cause a load error.
+
+```
+# Correct — direct binary download
+https://huggingface.co/<owner>/<repo>/resolve/main/<file>.safetensors
+
+# Wrong — returns HTML page
+https://huggingface.co/<owner>/<repo>/blob/main/<file>.safetensors
+```
 
 ### LoRA Blending
 
