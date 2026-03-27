@@ -223,13 +223,6 @@ def get_pipeline():
 
         pipe.to("cuda")
 
-        # Enable Flash Attention 2 for better performance on Ada/Blackwell GPUs (4090/5090)
-        try:
-            pipe.transformer.set_attention_backend("flash")
-            print("Flash Attention 2 enabled on transformer.")
-        except Exception as e:
-            print(f"Flash Attention 2 not available, using default SDPA: {repr(e)}")
-
         # Optional: torch.compile for faster inference after first warm-up request
         if _to_bool(os.environ.get("TORCH_COMPILE"), default=False):
             try:
