@@ -554,103 +554,77 @@ def _patch_missing_lora_alphas(state_dict):
         print(f"Added {alpha_added} missing LoRA alpha keys (default alpha=rank).")
 
 
-def _load_lora_state_dict_robust(pipeline, lora_path):
-    """Load LoRA state dict, handling cases where diffusers' internal conversion fails.
-
-    Tries pipeline.lora_state_dict() first (handles most standard LoRAs).
-    Falls back to direct safetensors load + alpha patching when the internal
-    _convert_non_diffusers_z_image_lora_to_diffusers raises KeyError on missing alpha keys.
-    """
-    # Try diffusers' built-in loader first
-    try:
-        state_payload = pipeline.lora_state_dict(lora_path, return_lora_metadata=True)
-        if isinstance(state_payload, tuple):
-            return state_payload[0]
-        return state_payload
-    except Exception as e:
-        print(f"pipeline.lora_state_dict failed ({type(e).__name__}: {str(e)[:150]}); loading safetensors directly.")
-
-    # Direct safetensors load — bypasses diffusers' conversion entirely
-    from safetensors.torch import load_file
-    state_dict = load_file(lora_path)
-    _patch_missing_lora_alphas(state_dict)
-
-    # Retry lora_state_dict via a re-saved temp file.  Some LoRAs use a
-    # non-diffusers key format (e.g. 'layers.X.attention.to_k.*') that
-    # diffusers CAN convert, but only when alpha keys are present.  Passing a
-    # dict skips diffusers' format-detection path, so we write the patched
-    # state dict to a new temp file and let the standard file-based loader run.
-    import tempfile
-    from safetensors.torch import save_file as _save_file
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as tmp:
-            patched_path = tmp.name
-        _save_file(state_dict, patched_path)
-        state_payload = pipeline.lora_state_dict(patched_path, return_lora_metadata=True)
-        if isinstance(state_payload, tuple):
-            return state_payload[0]
-        return state_payload
-    except Exception as e:
-        print(
-            f"pipeline.lora_state_dict (patched file) failed "
-            f"({type(e).__name__}: {str(e)[:150]}); using raw state dict."
-        )
-    finally:
-        import os as _os
-        try:
-            _os.unlink(patched_path)
-        except Exception:
-            pass
-
-    return state_dict
-
-
 def _load_lora(pipeline, lora_path, adapter_name):
     """
     Load a single LoRA adapter onto the pipeline by adapter_name.
     Does NOT activate it — call _activate_loras() after all LoRAs are loaded.
 
-    Handles multiple failure modes from diffusers' internal LoRA loading:
-    - Target module name mismatches (Flux2/Klein format)
-    - Missing alpha keys in non-diffusers LoRA conversion
-    - Any other conversion errors that our fallback can handle
+    Three-attempt strategy:
+    1. Standard load_lora_weights (handles most LoRAs).
+    2. Patch missing alpha keys → re-save → retry load_lora_weights.
+       load_lora_weights handles full PEFT adapter registration; splitting into
+       lora_state_dict + load_lora_into_transformer uses a different key format
+       and fails to register the adapter name reliably.
+    3. Flux2/Klein format conversion + load_lora_into_transformer (last resort).
     """
+    # Attempt 1: standard path
     try:
         pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
         return
     except Exception as e:
-        if not hasattr(pipeline, "load_lora_into_transformer"):
-            raise
-
         message = str(e)
-        # Only catch errors we know how to handle; let unknown errors propagate
         is_recoverable = (
             ("Target modules" in message and "not found in the base model" in message)
             or isinstance(e, KeyError)
             or "alpha" in message
         )
-        if not is_recoverable:
+        if not is_recoverable or not hasattr(pipeline, "load_lora_into_transformer"):
             raise
-
         print(
             f"LoRA load_lora_weights failed ({type(e).__name__}: {message[:200]}); "
-            f"retrying with direct injection (adapter='{adapter_name}')."
+            f"patching alpha keys and retrying (adapter='{adapter_name}')."
         )
         pipeline.unload_lora_weights()
 
-        state_dict = _load_lora_state_dict_robust(pipeline, lora_path)
+    # Attempt 2: patch missing alpha keys, re-save to temp file, retry load_lora_weights
+    import tempfile
+    from safetensors.torch import load_file, save_file as _save_file
+    import os as _os
+    state_dict = load_file(lora_path)
+    _patch_missing_lora_alphas(state_dict)
 
-        if _looks_like_flux2_klein_lora(state_dict):
-            print("Detected Flux2/Klein LoRA format; converting keys for Z-Image transformer.")
-            state_dict = _convert_flux2_klein_lora_to_diffusers(state_dict)
-
-        pipeline.load_lora_into_transformer(
-            state_dict=state_dict,
-            transformer=pipeline.transformer,
-            adapter_name=adapter_name,
-            metadata=None,
-            _pipeline=pipeline,
+    patched_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".safetensors", delete=False) as tmp:
+            patched_path = tmp.name
+        _save_file(state_dict, patched_path)
+        pipeline.load_lora_weights(patched_path, adapter_name=adapter_name)
+        return
+    except Exception as e:
+        print(
+            f"load_lora_weights (patched) failed ({type(e).__name__}: {str(e)[:150]}); "
+            f"trying format conversion."
         )
+        pipeline.unload_lora_weights()
+    finally:
+        if patched_path:
+            try:
+                _os.unlink(patched_path)
+            except Exception:
+                pass
+
+    # Attempt 3: Flux2/Klein format conversion + direct injection
+    if _looks_like_flux2_klein_lora(state_dict):
+        print("Detected Flux2/Klein LoRA format; converting keys for Z-Image transformer.")
+        state_dict = _convert_flux2_klein_lora_to_diffusers(state_dict)
+
+    pipeline.load_lora_into_transformer(
+        state_dict=state_dict,
+        transformer=pipeline.transformer,
+        adapter_name=adapter_name,
+        metadata=None,
+        _pipeline=pipeline,
+    )
 
 
 def _activate_loras(pipeline, adapter_names, adapter_scales):
