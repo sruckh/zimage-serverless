@@ -2,6 +2,11 @@ import time
 t_start = time.time()
 import runpod
 import os
+
+# Reduce CUDA allocator fragmentation — must be set before PyTorch initializes CUDA.
+# Allows the allocator to grow/shrink segments instead of holding fixed-size blocks,
+# which prevents OOM when reserved-but-unallocated memory can't be recombined.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import gc
 import torch
 from torch import nn
@@ -720,7 +725,7 @@ def handler(job):
             job_input.get("second_pass_enabled"),
             default=second_pass_enabled_default,
         )
-        second_pass_upscale = float(job_input.get("second_pass_upscale", 1.5))
+        second_pass_upscale = float(job_input.get("second_pass_upscale", 1.25))
         second_pass_strength = float(job_input.get("second_pass_strength", 0.22))
         second_pass_steps = int(job_input.get("second_pass_steps", 10))
         second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 1.5))

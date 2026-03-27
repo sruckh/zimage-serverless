@@ -63,7 +63,7 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `shift` | Float | No | model default (~3.0) | Scheduler shift controlling composition vs detail balance. Higher values (5–7) favour creative composition; lower (1–2) favour detail. 3.0–3.5 is a good photorealism sweet spot. |
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling behavior (`auto`: on only for >1024×1024 area). |
 | `second_pass_enabled` | Boolean | No | env/default | Enables pass-2 upscale + img2img refinement. |
-| `second_pass_upscale` | Float | No | `1.5` | Output scale factor for pass 2 upscaling (1.5x default to reduce VRAM). |
+| `second_pass_upscale` | Float | No | `1.25` | Output scale factor for pass 2 upscaling. 1.25x keeps peak VRAM within 24 GB with LoRAs loaded; use 1.5 only on cards with more headroom. |
 | `second_pass_strength` | Float | No | `0.22` | Img2img strength for pass 2 (higher value gives the refinement pass more creative latitude). |
 | `second_pass_steps` | Integer | No | `10` | Img2img denoising steps for pass 2. |
 | `second_pass_guidance_scale` | Float | No | `1.5` | CFG scale for pass 2. |
