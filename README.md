@@ -1,13 +1,14 @@
 # Z-Image RunPod Serverless Worker
 
-This project implements a RunPod serverless worker for the **Z-Image** base model. it supports dynamic LoRA loading from external URLs (e.g., Backblaze B2 presigned URLs) and uploads high-quality JPG outputs back to S3-compatible storage.
+This project implements a RunPod serverless worker for the **Z-Image** base model. It supports dynamic LoRA loading from external URLs (e.g., Backblaze B2 presigned URLs) and uploads lossless PNG outputs back to S3-compatible storage.
 
 ## Features
 
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
-- **Photorealism-Oriented Defaults:** Uses 50 steps with realism-leaning CFG defaults (`cfg_normalization=True`, `cfg_truncation=1.0`).
-- **Scheduler Control:** Supports `use_beta_sigmas` to toggle FlowMatch beta-sigma scheduling.
+- **Photorealism-Oriented Defaults:** Uses 50 steps, `guidance_scale=4.0`, realism-leaning CFG defaults (`cfg_normalization=True`, `cfg_truncation=1.0`), and a built-in negative prompt to suppress common artifacts.
+- **Flash Attention 2:** Automatically enabled on Ada/Blackwell GPUs (RTX 4090/5090) for faster inference and better numerical precision.
+- **Scheduler Control:** Supports `use_beta_sigmas` to toggle FlowMatch beta-sigma scheduling and `shift` to adjust the composition/detail balance.
 - **Adaptive VAE Tiling:** Keeps VAE tiling off at 1024-ish outputs by default to reduce potential tile artifacts, while enabling it for larger images.
 - **Optional Two-Pass Refinement:** Upscales pass-1 output with the `4xPurePhoto-RealPLSKR` checkpoint and runs a Z-Image img2img refinement pass for extra detail.
 - **Dynamic Multi-LoRA Support:** Load one or more LoRAs from any URL at runtime. Multiple LoRAs are downloaded in parallel and blended by weight. Legacy single-LoRA inputs remain fully supported.
@@ -30,6 +31,7 @@ Configure these variables in your RunPod Endpoint/Template:
 | `UPSCALE_MODEL_URL` | Optional. URL for the upscaler `.pth` model. | Starinspace 4xPurePhoto-RealPLSKR |
 | `UPSCALE_MODEL_PATH` | Optional. Cached path for the upscaler model. | `/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth` |
 | `UPSCALE_USE_CUDA` | Optional. Runs the RealPLKSR upscaler on CUDA when `true`; CPU by default to reduce VRAM pressure. | `false` |
+| `TORCH_COMPILE` | Optional. Compiles the transformer for faster inference after warm-up. First request will be slower. | `false` |
 
 The bootstrap script now checks `UPSCALE_MODEL_PATH` on every start and downloads it once if missing, even when `.installed_v2` already exists.
 
@@ -48,24 +50,25 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `loras` | Array | No | - | **Preferred multi-LoRA input.** Array of `{"url": "...", "scale": 1.0}` objects. `scale` is optional per entry (default `0.85`). See [LoRA blending](#lora-blending) below. |
 | `lora_url` | String | No | - | **Legacy.** URL to a single `.safetensors` LoRA file. Ignored when `loras` is provided. |
 | `lora_scale` | Float | No | `0.85` | **Legacy.** Scale for the single `lora_url` adapter (0.8–0.9 recommended). Ignored when `loras` is provided. |
-| `negative_prompt` | String | No | `""` | Text to avoid in the generation. |
+| `negative_prompt` | String | No | *(see below)* | Text to avoid in the generation. A photorealism-oriented default is applied when omitted; pass `""` to disable. |
 | `width` | Integer | No | `1024` | Image width. |
 | `height` | Integer | No | `1024` | Image height. |
 | `steps` | Integer | No | `50` | Number of inference steps. |
-| `guidance_scale` | Float | No | `3.0` | CFG scale (3.0–4.5 recommended for likeness). |
+| `guidance_scale` | Float | No | `4.0` | CFG scale (3.0–5.0 recommended; 4.0 matches official Z-Image guidance). |
 | `cfg_normalization`| Boolean | No | `True` | CFG normalization toggle (enabled by default for photorealism). |
 | `cfg_truncation` | Float | No | `1.0` | 1.0 recommended; lower to fix over-saturation. |
 | `max_sequence_length`| Integer | No | `512` | Token limit for long prompts. |
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |
 | `use_beta_sigmas` | Boolean | No | `True` | Explicitly rebuilds FlowMatch scheduler with/without beta sigmas. |
+| `shift` | Float | No | model default (~3.0) | Scheduler shift controlling composition vs detail balance. Higher values (5–7) favour creative composition; lower (1–2) favour detail. 3.0–3.5 is a good photorealism sweet spot. |
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling behavior (`auto`: on only for >1024×1024 area). |
 | `second_pass_enabled` | Boolean | No | env/default | Enables pass-2 upscale + img2img refinement. |
 | `second_pass_upscale` | Float | No | `1.5` | Output scale factor for pass 2 upscaling (1.5x default to reduce VRAM). |
-| `second_pass_strength` | Float | No | `0.18` | Img2img strength for pass 2 (lower default to preserve LoRA likeness). |
-| `second_pass_steps` | Integer | No | `8` | Img2img denoising steps for pass 2. |
-| `second_pass_guidance_scale` | Float | No | `1.2` | CFG scale for pass 2 (lower default to avoid over-rewrite). |
+| `second_pass_strength` | Float | No | `0.22` | Img2img strength for pass 2 (higher value gives the refinement pass more creative latitude). |
+| `second_pass_steps` | Integer | No | `10` | Img2img denoising steps for pass 2. |
+| `second_pass_guidance_scale` | Float | No | `1.5` | CFG scale for pass 2. |
 | `second_pass_seed` | Integer | No | `seed` | Seed for pass 2 reproducibility. |
-| `second_pass_cfg_normalization` | Boolean | No | `False` | CFG normalization toggle for pass 2. |
+| `second_pass_cfg_normalization` | Boolean | No | `True` | CFG normalization toggle for pass 2 (now matches pass 1 default for photorealism). |
 | `second_pass_cfg_truncation` | Float | No | `1.0` | CFG truncation for pass 2. |
 | `second_pass_max_sequence_length`| Integer | No | `min(max_sequence_length, 384)` | Token limit for pass-2 refinement to reduce VRAM pressure. |
 | `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Scheduler beta-sigma toggle for pass 2. |

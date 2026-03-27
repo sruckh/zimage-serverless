@@ -142,23 +142,30 @@ def _to_optional_bool(value):
         return None
     return _to_bool(value, default=False)
 
-def _configure_scheduler(pipeline, use_beta_sigmas):
+def _configure_scheduler(pipeline, use_beta_sigmas, shift=None):
     """
-    Rebuild scheduler from the loaded model config while optionally enabling beta sigmas.
+    Rebuild scheduler from the loaded model config while optionally enabling beta sigmas
+    and adjusting the shift parameter (controls composition vs detail balance).
     """
     current_use_beta_sigmas = bool(pipeline.scheduler.config.get("use_beta_sigmas", False))
-    if current_use_beta_sigmas == use_beta_sigmas:
+    current_shift = float(pipeline.scheduler.config.get("shift", 3.0))
+    target_shift = shift if shift is not None else current_shift
+
+    if current_use_beta_sigmas == use_beta_sigmas and abs(current_shift - target_shift) < 1e-6:
         return
     try:
+        kwargs = {"use_beta_sigmas": use_beta_sigmas}
+        if shift is not None:
+            kwargs["shift"] = shift
         pipeline.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
             pipeline.scheduler.config,
-            use_beta_sigmas=use_beta_sigmas,
+            **kwargs,
         )
-        print(f"Scheduler configured with use_beta_sigmas={use_beta_sigmas}")
+        print(f"Scheduler configured: use_beta_sigmas={use_beta_sigmas}, shift={kwargs.get('shift', current_shift)}")
     except Exception as e:
         print(
-            f"Warning: could not configure scheduler use_beta_sigmas={use_beta_sigmas} "
-            f"(keeping model default): {repr(e)}"
+            f"Warning: could not configure scheduler use_beta_sigmas={use_beta_sigmas}, "
+            f"shift={target_shift} (keeping model default): {repr(e)}"
         )
 
 def _resolve_use_beta_sigmas(job_input_value):
@@ -215,6 +222,23 @@ def get_pipeline():
         )
 
         pipe.to("cuda")
+
+        # Enable Flash Attention 2 for better performance on Ada/Blackwell GPUs (4090/5090)
+        try:
+            pipe.transformer.set_attention_backend("flash")
+            print("Flash Attention 2 enabled on transformer.")
+        except Exception as e:
+            print(f"Flash Attention 2 not available, using default SDPA: {repr(e)}")
+
+        # Optional: torch.compile for faster inference after first warm-up request
+        if _to_bool(os.environ.get("TORCH_COMPILE"), default=False):
+            try:
+                print("Compiling transformer with torch.compile (first request will be slower)...")
+                pipe.transformer.compile()
+                print("Transformer compiled successfully.")
+            except Exception as e:
+                print(f"torch.compile failed, continuing without: {repr(e)}")
+
         print("Model loaded successfully.")
     return pipe
 
@@ -578,11 +602,16 @@ def handler(job):
         else:
             lora_list = []
 
-        negative_prompt = job_input.get("negative_prompt", "")
+        negative_prompt = job_input.get(
+            "negative_prompt",
+            "low quality, blurry, distorted, deformed, disfigured, bad anatomy, "
+            "bad proportions, extra limbs, watermark, text, signature, jpeg artifacts, "
+            "cropped, out of frame, worst quality, normal quality",
+        )
         width = int(job_input.get("width", 1024))
         height = int(job_input.get("height", 1024))
         steps = int(job_input.get("steps", 50))
-        guidance_scale = float(job_input.get("guidance_scale", 3.5))
+        guidance_scale = float(job_input.get("guidance_scale", 4.0))
         seed = int(job_input.get("seed", 42))
 
         # Use cfg_normalization=True by default for more photorealistic rendering.
@@ -594,6 +623,13 @@ def handler(job):
         # Default behavior is beta-sigmas enabled.
         use_beta_sigmas = _resolve_use_beta_sigmas(job_input.get("use_beta_sigmas"))
 
+        # Shift controls the composition vs detail balance in the scheduler.
+        # Higher values (5-7) favour creative composition; lower (1-2) favour detail.
+        # Z-Image default is ~3.0. 3.0-3.5 is a good photorealism sweet spot.
+        shift = job_input.get("shift")
+        if shift is not None:
+            shift = float(shift)
+
         # Optional second-pass refinement: upscale + Z-Image img2img
         second_pass_enabled_default = _to_bool(os.environ.get("SECOND_PASS_DEFAULT_ENABLED"), default=True)
         second_pass_enabled = _to_bool(
@@ -601,13 +637,13 @@ def handler(job):
             default=second_pass_enabled_default,
         )
         second_pass_upscale = float(job_input.get("second_pass_upscale", 1.5))
-        second_pass_strength = float(job_input.get("second_pass_strength", 0.18))
-        second_pass_steps = int(job_input.get("second_pass_steps", 8))
-        second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 1.2))
+        second_pass_strength = float(job_input.get("second_pass_strength", 0.22))
+        second_pass_steps = int(job_input.get("second_pass_steps", 10))
+        second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 1.5))
         second_pass_seed = int(job_input.get("second_pass_seed", seed))
         second_pass_cfg_normalization = _to_bool(
             job_input.get("second_pass_cfg_normalization"),
-            default=False,
+            default=True,
         )
         second_pass_cfg_truncation = float(job_input.get("second_pass_cfg_truncation", 1.0))
         second_pass_max_sequence_length = int(
@@ -638,7 +674,7 @@ def handler(job):
         pipeline = get_pipeline()
         img2img_pipeline = get_img2img_pipeline() if second_pass_enabled else None
         if use_beta_sigmas is not None:
-            _configure_scheduler(pipeline, use_beta_sigmas)
+            _configure_scheduler(pipeline, use_beta_sigmas, shift=shift)
         if img2img_pipeline is not None:
             if second_pass_use_beta_sigmas is not None:
                 _configure_scheduler(img2img_pipeline, second_pass_use_beta_sigmas)
@@ -752,10 +788,10 @@ def handler(job):
                 generator=second_generator,
             ).images[0]
 
-        # 5. Save as High-Quality JPG
-        output_filename = f"{uuid.uuid4()}.jpg"
+        # 5. Save as lossless PNG for maximum image fidelity
+        output_filename = f"{uuid.uuid4()}.png"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
-        result.save(output_path, format="JPEG", quality=95)
+        result.save(output_path, format="PNG")
         print(f"Image saved to {output_path}")
 
         # 6. Upload to S3
