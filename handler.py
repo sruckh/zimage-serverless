@@ -520,36 +520,84 @@ def _convert_flux2_klein_lora_to_diffusers(state_dict):
     converted_state_dict = {f"transformer.{k}": v for k, v in converted_state_dict.items()}
     return converted_state_dict
 
+def _patch_missing_lora_alphas(state_dict):
+    """Add missing alpha keys for LoRA entries that have lora_down/lora_up but no alpha.
+
+    Some non-diffusers Z-Image LoRAs omit alpha keys.  When absent the convention
+    is alpha = rank, giving an effective scaling of 1.0.
+    """
+    import re as _re
+    alpha_added = 0
+    for key in list(state_dict.keys()):
+        match = _re.match(r"^(.*)\.lora_down\.weight$", key)
+        if match:
+            prefix = match.group(1)
+            alpha_key = f"{prefix}.alpha"
+            if alpha_key not in state_dict:
+                rank = state_dict[key].shape[0]
+                state_dict[alpha_key] = torch.tensor(rank)
+                alpha_added += 1
+    if alpha_added:
+        print(f"Added {alpha_added} missing LoRA alpha keys (default alpha=rank).")
+
+
+def _load_lora_state_dict_robust(pipeline, lora_path):
+    """Load LoRA state dict, handling cases where diffusers' internal conversion fails.
+
+    Tries pipeline.lora_state_dict() first (handles most standard LoRAs).
+    Falls back to direct safetensors load + alpha patching when the internal
+    _convert_non_diffusers_z_image_lora_to_diffusers raises KeyError on missing alpha keys.
+    """
+    # Try diffusers' built-in loader first
+    try:
+        state_payload = pipeline.lora_state_dict(lora_path, return_lora_metadata=True)
+        if isinstance(state_payload, tuple):
+            return state_payload[0]
+        return state_payload
+    except Exception as e:
+        print(f"pipeline.lora_state_dict failed ({type(e).__name__}: {str(e)[:150]}); loading safetensors directly.")
+
+    # Direct safetensors load — bypasses diffusers' conversion entirely
+    from safetensors.torch import load_file
+    state_dict = load_file(lora_path)
+    _patch_missing_lora_alphas(state_dict)
+    return state_dict
+
+
 def _load_lora(pipeline, lora_path, adapter_name):
     """
     Load a single LoRA adapter onto the pipeline by adapter_name.
     Does NOT activate it — call _activate_loras() after all LoRAs are loaded.
 
-    Retries without adapter metadata when PEFT target module names in metadata
-    don't match the current Z-Image transformer module names (Flux2/Klein format).
+    Handles multiple failure modes from diffusers' internal LoRA loading:
+    - Target module name mismatches (Flux2/Klein format)
+    - Missing alpha keys in non-diffusers LoRA conversion
+    - Any other conversion errors that our fallback can handle
     """
     try:
         pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
+        return
     except Exception as e:
-        message = str(e)
-        target_module_mismatch = "Target modules" in message and "not found in the base model" in message
-        if not target_module_mismatch:
+        if not hasattr(pipeline, "load_lora_into_transformer"):
             raise
 
-        if not hasattr(pipeline, "lora_state_dict") or not hasattr(pipeline, "load_lora_into_transformer"):
+        message = str(e)
+        # Only catch errors we know how to handle; let unknown errors propagate
+        is_recoverable = (
+            ("Target modules" in message and "not found in the base model" in message)
+            or isinstance(e, KeyError)
+            or "alpha" in message
+        )
+        if not is_recoverable:
             raise
 
         print(
-            "LoRA metadata target module mismatch detected; retrying without metadata "
-            f"(adapter='{adapter_name}')."
+            f"LoRA load_lora_weights failed ({type(e).__name__}: {message[:200]}); "
+            f"retrying with direct injection (adapter='{adapter_name}')."
         )
         pipeline.unload_lora_weights()
 
-        state_payload = pipeline.lora_state_dict(lora_path, return_lora_metadata=True)
-        if isinstance(state_payload, tuple):
-            state_dict = state_payload[0]
-        else:
-            state_dict = state_payload
+        state_dict = _load_lora_state_dict_robust(pipeline, lora_path)
 
         if _looks_like_flux2_klein_lora(state_dict):
             print("Detected Flux2/Klein LoRA format; converting keys for Z-Image transformer.")
