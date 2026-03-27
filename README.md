@@ -7,7 +7,7 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
 - **Photorealism-Oriented Defaults:** Uses 50 steps, `guidance_scale=4.0`, realism-leaning CFG defaults (`cfg_normalization=True`, `cfg_truncation=1.0`), and a built-in negative prompt to suppress common artifacts.
-- **Flash Attention 2:** Automatically enabled on Ada/Blackwell GPUs (RTX 4090/5090) for faster inference and better numerical precision.
+- **Flash Attention 2:** Enabled at model load time via `attn_implementation="flash_attention_2"` when the `flash-attn` package is available (RTX 4090/5090 and newer). Falls back to PyTorch SDPA automatically. Enabled at init rather than post-load to remain fully compatible with LoRA injection.
 - **Scheduler Control:** Supports `use_beta_sigmas` to toggle FlowMatch beta-sigma scheduling and `shift` to adjust the composition/detail balance.
 - **Adaptive VAE Tiling:** Keeps VAE tiling off at 1024-ish outputs by default to reduce potential tile artifacts, while enabling it for larger images.
 - **Optional Two-Pass Refinement:** Upscales pass-1 output with the `4xPurePhoto-RealPLSKR` checkpoint and runs a Z-Image img2img refinement pass for extra detail.

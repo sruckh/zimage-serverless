@@ -214,12 +214,26 @@ def get_pipeline():
     if pipe is None:
         hf_token = os.environ.get("HF_TOKEN")
         print(f"Loading model: {MODEL_ID}")
-        pipe = ZImagePipeline.from_pretrained(
-            MODEL_ID,
-            torch_dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,
-            token=hf_token if hf_token else None
-        )
+        # Prefer Flash Attention 2 at model-init time (LoRA-safe; avoids post-load
+        # set_attention_backend which modifies module structure after the fact).
+        # Falls back to default SDPA if FA2 is unavailable or unsupported.
+        try:
+            pipe = ZImagePipeline.from_pretrained(
+                MODEL_ID,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                token=hf_token if hf_token else None,
+                attn_implementation="flash_attention_2",
+            )
+            print("Model loaded with Flash Attention 2.")
+        except Exception as e:
+            print(f"Flash Attention 2 unavailable ({type(e).__name__}); loading with default attention.")
+            pipe = ZImagePipeline.from_pretrained(
+                MODEL_ID,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                token=hf_token if hf_token else None,
+            )
 
         pipe.to("cuda")
 
