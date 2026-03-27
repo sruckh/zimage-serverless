@@ -561,6 +561,22 @@ def _load_lora_state_dict_robust(pipeline, lora_path):
     from safetensors.torch import load_file
     state_dict = load_file(lora_path)
     _patch_missing_lora_alphas(state_dict)
+
+    # Retry with the patched dict: some LoRAs use a non-diffusers key format
+    # (e.g. 'layers.X.attention.to_k.*') that diffusers CAN convert, but only
+    # if the alpha keys are present.  Now that we've patched them in, give
+    # diffusers' internal converter one more chance before falling back to raw.
+    try:
+        state_payload = pipeline.lora_state_dict(state_dict, return_lora_metadata=True)
+        if isinstance(state_payload, tuple):
+            return state_payload[0]
+        return state_payload
+    except Exception as e:
+        print(
+            f"pipeline.lora_state_dict (patched dict) failed "
+            f"({type(e).__name__}: {str(e)[:150]}); using raw state dict."
+        )
+
     return state_dict
 
 
