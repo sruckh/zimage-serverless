@@ -528,15 +528,16 @@ def _convert_flux2_klein_lora_to_diffusers(state_dict):
     return converted_state_dict
 
 def _patch_missing_lora_alphas(state_dict):
-    """Add missing alpha keys for LoRA entries that have lora_down/lora_up but no alpha.
+    """Add missing alpha keys for LoRA entries that omit them.
 
-    Some non-diffusers Z-Image LoRAs omit alpha keys.  When absent the convention
+    Handles both lora_down/lora_up (kohya/non-diffusers) and lora_A/lora_B
+    (diffusers-native) naming conventions.  When alpha is absent the convention
     is alpha = rank, giving an effective scaling of 1.0.
     """
     import re as _re
     alpha_added = 0
     for key in list(state_dict.keys()):
-        match = _re.match(r"^(.*)\.lora_down\.weight$", key)
+        match = _re.match(r"^(.*)\.(lora_down|lora_A)\.weight$", key)
         if match:
             prefix = match.group(1)
             alpha_key = f"{prefix}.alpha"
