@@ -65,15 +65,15 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling behavior (`auto`: on only for >1024×1024 area). |
 | `second_pass_enabled` | Boolean | No | env/default | Enables pass-2 upscale + img2img refinement. |
 | `second_pass_upscale` | Float | No | `1.25` | Output scale factor for pass 2 upscaling. 1.25x keeps peak VRAM within 24 GB with LoRAs loaded; use 1.5 only on cards with more headroom. |
-| `second_pass_strength` | Float | No | `0.22` | Img2img strength for pass 2 (higher value gives the refinement pass more creative latitude). |
-| `second_pass_steps` | Integer | No | `10` | Img2img denoising steps for pass 2. |
-| `second_pass_guidance_scale` | Float | No | `1.5` | CFG scale for pass 2. |
+| `second_pass_strength` | Float | No | `0.30` | Img2img strength for pass 2. 0.25–0.40 adds detail without straying from the first-pass composition. |
+| `second_pass_steps` | Integer | No | `20` | Img2img denoising steps for pass 2. |
+| `second_pass_guidance_scale` | Float | No | `4.0` | CFG scale for pass 2. Matches pass-1 default so the refinement reinforces photorealistic detail rather than softening it. |
 | `second_pass_seed` | Integer | No | `seed` | Seed for pass 2 reproducibility. |
 | `second_pass_cfg_normalization` | Boolean | No | `True` | CFG normalization toggle for pass 2 (now matches pass 1 default for photorealism). |
 | `second_pass_cfg_truncation` | Float | No | `1.0` | CFG truncation for pass 2. |
 | `second_pass_max_sequence_length`| Integer | No | `min(max_sequence_length, 384)` | Token limit for pass-2 refinement to reduce VRAM pressure. |
 | `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Scheduler beta-sigma toggle for pass 2. |
-| `second_pass_vae_tiling` | Boolean | No | `True` | VAE tiling for pass 2 (enabled by default for memory headroom). |
+| `second_pass_vae_tiling` | Boolean | No | `False` | VAE tiling for pass 2. Disabled by default — tiling causes visible seams/fraying at second-pass image sizes. Use slicing (`second_pass_vae_slicing`) instead. |
 | `second_pass_vae_slicing` | Boolean | No | `True` | VAE slicing for pass 2 (enabled by default for memory headroom). |
 
 ### LoRA URL Format

@@ -726,9 +726,9 @@ def handler(job):
             default=second_pass_enabled_default,
         )
         second_pass_upscale = float(job_input.get("second_pass_upscale", 1.25))
-        second_pass_strength = float(job_input.get("second_pass_strength", 0.22))
-        second_pass_steps = int(job_input.get("second_pass_steps", 10))
-        second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 1.5))
+        second_pass_strength = float(job_input.get("second_pass_strength", 0.30))
+        second_pass_steps = int(job_input.get("second_pass_steps", 20))
+        second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 4.0))
         second_pass_seed = int(job_input.get("second_pass_seed", seed))
         second_pass_cfg_normalization = _to_bool(
             job_input.get("second_pass_cfg_normalization"),
@@ -751,9 +751,9 @@ def handler(job):
 
         second_pass_vae_tiling_input = job_input.get("second_pass_vae_tiling")
         if second_pass_vae_tiling_input is None:
-            second_pass_vae_tiling = True
+            second_pass_vae_tiling = False  # Tiling causes visible seams at second-pass sizes; use slicing only
         else:
-            second_pass_vae_tiling = _to_bool(second_pass_vae_tiling_input, default=True)
+            second_pass_vae_tiling = _to_bool(second_pass_vae_tiling_input, default=False)
         second_pass_vae_slicing = _to_bool(job_input.get("second_pass_vae_slicing"), default=True)
         
         # Unique prefix for this request's adapter names to avoid PEFT collisions
