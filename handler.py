@@ -575,7 +575,8 @@ def _load_lora(pipeline, lora_path, adapter_name):
         message = str(e)
         is_recoverable = (
             ("Target modules" in message and "not found in the base model" in message)
-            or ("No modules were targeted" in message)  # metadata target_modules mismatch
+            or ("No modules were targeted" in message)       # metadata target_modules mismatch
+            or ("state_dict` should be empty" in message)   # unconsumed keys (e.g. context_refiner.*)
             or isinstance(e, KeyError)
             or "alpha" in message
         )
@@ -588,11 +589,27 @@ def _load_lora(pipeline, lora_path, adapter_name):
         # Do NOT call unload_lora_weights() here — that would remove all previously
         # loaded adapters (e.g. LoRA 0 already loaded when LoRA 1 fails).
 
-    # Attempt 2: patch missing alpha keys, re-save to temp file, retry load_lora_weights
+    # Attempt 2: normalize keys + patch missing alpha keys, re-save to temp file, retry load_lora_weights
     import tempfile
     from safetensors.torch import load_file, save_file as _save_file
     import os as _os
     state_dict = load_file(lora_path)
+
+    # PR #13209 fix (backported): some Z-Image LoRAs use dot-separated module names
+    # ("context.refiner.", "noise.refiner.") instead of the underscore form that
+    # diffusers' _convert_non_diffusers_z_image_lora_to_diffusers expects.
+    # Normalize them here so the conversion function can process all keys.
+    needs_dot_norm = any(
+        "context.refiner." in k or "noise.refiner." in k
+        for k in state_dict
+    )
+    if needs_dot_norm:
+        state_dict = {
+            k.replace("context.refiner.", "context_refiner.").replace("noise.refiner.", "noise_refiner."): v
+            for k, v in state_dict.items()
+        }
+        print(f"Normalized context.refiner./noise.refiner. dot keys to underscore form ({len(state_dict)} keys).")
+
     _patch_missing_lora_alphas(state_dict)
 
     patched_path = None
@@ -614,10 +631,19 @@ def _load_lora(pipeline, lora_path, adapter_name):
             except Exception:
                 pass
 
-    # Attempt 3: Flux2/Klein format conversion + direct injection
+    # Attempt 3: format conversion + direct injection.
+    # _convert_flux2_klein_lora_to_diffusers already adds 'transformer.' prefix.
+    # For other non-standard formats (e.g. Z-Image native with 'layers.*' and
+    # 'context_refiner.*' keys) we add the prefix here so PEFT can match them
+    # against the model's transformer.layers.* / transformer.context_refiner.* modules.
     if _looks_like_flux2_klein_lora(state_dict):
         print("Detected Flux2/Klein LoRA format; converting keys for Z-Image transformer.")
         state_dict = _convert_flux2_klein_lora_to_diffusers(state_dict)
+    else:
+        state_dict = {
+            (k if k.startswith("transformer.") else f"transformer.{k}"): v
+            for k, v in state_dict.items()
+        }
 
     pipeline.load_lora_into_transformer(
         state_dict=state_dict,
