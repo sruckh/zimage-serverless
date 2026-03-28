@@ -610,39 +610,11 @@ def _load_lora(pipeline, lora_path, adapter_name):
         }
         print(f"Normalized context.refiner./noise.refiner. dot keys to underscore form ({len(state_dict)} keys).")
 
-    # Always synthesize missing alpha keys first (e.g. K1mScum has no alphas in file).
+    # Synthesize missing alpha keys (e.g. K1mScum has none in the file).
+    # diffusers >= 0.37.1 requires alpha keys to be present in the diffusers-format
+    # (lora_A/lora_B) path — it pops and applies them for scaling. Providing synthetic
+    # alpha=rank keys gives an effective scale of 1.0, which is the correct default.
     _patch_missing_lora_alphas(state_dict)
-
-    # PR #13209 fix (backported): LoRAs in diffusers format (lora_A/lora_B) that also
-    # carry .alpha keys fail on old diffusers — the has_diffusers_lora_id branch copies
-    # weights but never pops alpha keys, leaving unconsumed leftovers ("state_dict should
-    # be empty"). Apply alpha scaling and strip all alpha keys for this format so diffusers
-    # receives a clean dict. Runs after patching so synthesized alphas are also consumed.
-    has_diffusers_fmt = any(".lora_A.weight" in k for k in state_dict)
-    has_kohya_fmt = any(".lora_down.weight" in k for k in state_dict)
-    if has_diffusers_fmt and not has_kohya_fmt:
-        alpha_applied = 0
-        for k in list(state_dict.keys()):
-            if not k.endswith(".lora_A.weight"):
-                continue
-            base = k[: -len(".lora_A.weight")]
-            alpha_key = base + ".alpha"
-            if alpha_key not in state_dict:
-                continue
-            rank = state_dict[k].shape[0]
-            alpha_val = state_dict.pop(alpha_key).item()
-            scale = alpha_val / rank
-            scale_a, scale_b = scale, 1.0
-            while scale_a * 2 < scale_b:
-                scale_a *= 2
-                scale_b /= 2
-            state_dict[k] = state_dict[k] * scale_a
-            b_key = base + ".lora_B.weight"
-            if b_key in state_dict:
-                state_dict[b_key] = state_dict[b_key] * scale_b
-            alpha_applied += 1
-        if alpha_applied:
-            print(f"Applied alpha scaling and stripped {alpha_applied} alpha keys (diffusers-format LoRA).")
 
     patched_path = None
     try:
