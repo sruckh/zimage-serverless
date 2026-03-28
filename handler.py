@@ -575,6 +575,7 @@ def _load_lora(pipeline, lora_path, adapter_name):
         message = str(e)
         is_recoverable = (
             ("Target modules" in message and "not found in the base model" in message)
+            or ("No modules were targeted" in message)  # metadata target_modules mismatch
             or isinstance(e, KeyError)
             or "alpha" in message
         )
@@ -582,9 +583,10 @@ def _load_lora(pipeline, lora_path, adapter_name):
             raise
         print(
             f"LoRA load_lora_weights failed ({type(e).__name__}: {message[:200]}); "
-            f"patching alpha keys and retrying (adapter='{adapter_name}')."
+            f"patching and retrying without metadata (adapter='{adapter_name}')."
         )
-        pipeline.unload_lora_weights()
+        # Do NOT call unload_lora_weights() here — that would remove all previously
+        # loaded adapters (e.g. LoRA 0 already loaded when LoRA 1 fails).
 
     # Attempt 2: patch missing alpha keys, re-save to temp file, retry load_lora_weights
     import tempfile
@@ -605,7 +607,6 @@ def _load_lora(pipeline, lora_path, adapter_name):
             f"load_lora_weights (patched) failed ({type(e).__name__}: {str(e)[:150]}); "
             f"trying format conversion."
         )
-        pipeline.unload_lora_weights()
     finally:
         if patched_path:
             try:
