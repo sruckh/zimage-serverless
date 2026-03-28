@@ -610,7 +610,39 @@ def _load_lora(pipeline, lora_path, adapter_name):
         }
         print(f"Normalized context.refiner./noise.refiner. dot keys to underscore form ({len(state_dict)} keys).")
 
-    _patch_missing_lora_alphas(state_dict)
+    # PR #13209 fix (backported): LoRAs in diffusers format (lora_A/lora_B) that also
+    # carry separate .alpha keys fail on old diffusers — the has_diffusers_lora_id branch
+    # copies weights but never pops alpha keys, leaving them as unconsumed leftovers.
+    # Detect the format and apply the appropriate preprocessing:
+    has_diffusers_fmt = any(".lora_A.weight" in k for k in state_dict)
+    has_kohya_fmt = any(".lora_down.weight" in k for k in state_dict)
+    if has_diffusers_fmt and not has_kohya_fmt:
+        # Apply alpha scaling and strip alpha keys so diffusers sees a clean dict.
+        alpha_applied = 0
+        for k in list(state_dict.keys()):
+            if not k.endswith(".lora_A.weight"):
+                continue
+            base = k[: -len(".lora_A.weight")]
+            alpha_key = base + ".alpha"
+            if alpha_key not in state_dict:
+                continue
+            rank = state_dict[k].shape[0]
+            alpha_val = state_dict.pop(alpha_key).item()
+            scale = alpha_val / rank
+            # Distribute scale between A and B (matches diffusers get_alpha_scales logic)
+            scale_a, scale_b = scale, 1.0
+            while scale_a * 2 < scale_b:
+                scale_a *= 2
+                scale_b /= 2
+            state_dict[k] = state_dict[k] * scale_a
+            b_key = base + ".lora_B.weight"
+            if b_key in state_dict:
+                state_dict[b_key] = state_dict[b_key] * scale_b
+            alpha_applied += 1
+        if alpha_applied:
+            print(f"Applied alpha scaling and stripped {alpha_applied} alpha keys (diffusers-format LoRA).")
+    else:
+        _patch_missing_lora_alphas(state_dict)
 
     patched_path = None
     try:
@@ -631,20 +663,17 @@ def _load_lora(pipeline, lora_path, adapter_name):
             except Exception:
                 pass
 
-    # Attempt 3: format conversion + direct injection.
-    # _convert_flux2_klein_lora_to_diffusers already adds 'transformer.' prefix.
-    # For other non-standard formats (e.g. Z-Image native with 'layers.*' and
-    # 'context_refiner.*' keys) we add the prefix here so PEFT can match them
-    # against the model's transformer.layers.* / transformer.context_refiner.* modules.
-    if _looks_like_flux2_klein_lora(state_dict):
-        print("Detected Flux2/Klein LoRA format; converting keys for Z-Image transformer.")
-        state_dict = _convert_flux2_klein_lora_to_diffusers(state_dict)
-    else:
-        state_dict = {
-            (k if k.startswith("transformer.") else f"transformer.{k}"): v
-            for k, v in state_dict.items()
-        }
-
+    # Attempt 3: Flux2/Klein format conversion + direct injection (last resort).
+    # Only Flux2/Klein is handled here; Z-Image native LoRAs should succeed in
+    # attempt 1 (diffusers >= 0.37.1) or attempt 2 (alpha handling above).
+    if not _looks_like_flux2_klein_lora(state_dict):
+        raise RuntimeError(
+            f"LoRA '{adapter_name}' could not be loaded after key normalization and "
+            f"alpha handling. Unknown format — remaining key sample: "
+            f"{list(state_dict.keys())[:4]}"
+        )
+    print("Detected Flux2/Klein LoRA format; converting keys for Z-Image transformer.")
+    state_dict = _convert_flux2_klein_lora_to_diffusers(state_dict)
     pipeline.load_lora_into_transformer(
         state_dict=state_dict,
         transformer=pipeline.transformer,
