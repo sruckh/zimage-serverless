@@ -768,7 +768,7 @@ def handler(job):
             _configure_scheduler(pipeline, use_beta_sigmas, shift=shift)
         if img2img_pipeline is not None:
             if second_pass_use_beta_sigmas is not None:
-                _configure_scheduler(img2img_pipeline, second_pass_use_beta_sigmas)
+                _configure_scheduler(img2img_pipeline, second_pass_use_beta_sigmas, shift=shift)
 
         if vae_tiling:
             pipeline.vae.enable_tiling()
