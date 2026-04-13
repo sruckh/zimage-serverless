@@ -25,7 +25,7 @@ def upload_image_to_s3(file_path, object_name, expiration=3600):
 
     try:
         # Upload the file
-        s3.upload_file(file_path, bucket_name, object_name, ExtraArgs={'ContentType': 'image/jpeg'})
+        s3.upload_file(file_path, bucket_name, object_name, ExtraArgs={'ContentType': 'image/png'})
         
         # Generate a pre-signed URL for the uploaded object
         response = s3.generate_presigned_url(

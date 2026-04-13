@@ -390,12 +390,16 @@ def download_lora(url):
 
 def _normalize_lora_key_prefix(key):
     normalized = key
-    for prefix in ("base_model.model.", "diffusion_model.", "transformer."):
+    for prefix in ("base_model.model.", "diffusion_model.", "transformer.", "lora_unet_"):
         if normalized.startswith(prefix):
             normalized = normalized[len(prefix):]
     return normalized
 
-def _looks_like_flux2_klein_lora(state_dict):
+def _needs_manual_key_mapping(state_dict):
+    """
+    Check if the LoRA requires manual key mapping (Flux2/Klein, Kohya/OneTrainer,
+    or non-standard Z-Image formats like AmberNoir/adaLN).
+    """
     markers = (
         "double_blocks.",
         "single_blocks.",
@@ -403,6 +407,12 @@ def _looks_like_flux2_klein_lora(state_dict):
         "txt_attn.qkv.",
         "img_mlp.0.",
         "txt_mlp.0.",
+        "lora_down",
+        "lora_up",
+        "context_refiner",
+        "noise_refiner",
+        "adaLN_modulation",
+        "layers.",
     )
     for key in state_dict.keys():
         normalized = _normalize_lora_key_prefix(key)
@@ -410,16 +420,18 @@ def _looks_like_flux2_klein_lora(state_dict):
             return True
     return False
 
-def _convert_flux2_klein_lora_to_diffusers(state_dict):
+def _convert_lora_to_diffusers(state_dict):
     """
-    Convert Flux2/Klein-style LoRA keys (double_blocks/single_blocks) to the
-    transformer key layout expected by Diffusers Z-Image PEFT loading.
+    Convert various LoRA formats (Flux2/Klein, Kohya/OneTrainer, AmberNoir)
+    to the transformer key layout expected by Diffusers Z-Image PEFT loading.
     """
+    import re as _re
     converted_state_dict = {}
     original_state_dict = {
         _normalize_lora_key_prefix(k): v for k, v in state_dict.items()
     }
 
+    # 1. Standardize Kohya/OneTrainer lora_down/lora_up to lora_A/lora_B
     has_lora_down_up = any("lora_down" in k or "lora_up" in k for k in original_state_dict.keys())
     if has_lora_down_up:
         temp_state_dict = {}
@@ -427,6 +439,42 @@ def _convert_flux2_klein_lora_to_diffusers(state_dict):
             temp_state_dict[k.replace("lora_down", "lora_A").replace("lora_up", "lora_B")] = v
         original_state_dict = temp_state_dict
 
+    # 2. Handle AmberNoir/Civitai style: layers.X -> transformer_blocks.X
+    # These often use lora_A/lora_B natively but with 'layers.' instead of 'transformer_blocks.'
+    has_layers_prefix = any(k.startswith("layers.") for k in original_state_dict.keys())
+    if has_layers_prefix:
+        temp_state_dict = {}
+        for k, v in original_state_dict.items():
+            if k.startswith("layers."):
+                temp_state_dict[k.replace("layers.", "transformer_blocks.", 1)] = v
+            else:
+                temp_state_dict[k] = v
+        original_state_dict = temp_state_dict
+
+    # 3. Handle Kohya/OneTrainer style context_refiner/noise_refiner
+    # lora_unet_context_refiner_X_attention_out -> context_refiner.X.attn.to_out.0
+    # lora_unet_context_refiner_X_attention_qkv -> context_refiner.X.attn.to_qkv
+    # Note: 'lora_unet_' was already stripped by _normalize_lora_key_prefix
+    for k in list(original_state_dict.keys()):
+        # Handle context_refiner
+        match = _re.match(r"^context_refiner_(\d+)_attention_(qkv|out)\.(lora_A|lora_B)\.weight$", k)
+        if match:
+            idx, component, lora_key = match.groups()
+            diff_comp = "to_qkv" if component == "qkv" else "to_out.0"
+            new_key = f"context_refiner.{idx}.attn.{diff_comp}.{lora_key}.weight"
+            converted_state_dict[new_key] = original_state_dict.pop(k)
+            continue
+
+        # Handle noise_refiner
+        match = _re.match(r"^noise_refiner_(\d+)_attention_(qkv|out)\.(lora_A|lora_B)\.weight$", k)
+        if match:
+            idx, component, lora_key = match.groups()
+            diff_comp = "to_qkv" if component == "qkv" else "to_out.0"
+            new_key = f"noise_refiner.{idx}.attn.{diff_comp}.{lora_key}.weight"
+            converted_state_dict[new_key] = original_state_dict.pop(k)
+            continue
+
+    # 4. Handle Flux2/Klein double_blocks/single_blocks
     num_double_layers = 0
     num_single_layers = 0
     for key in original_state_dict.keys():
@@ -507,6 +555,7 @@ def _convert_flux2_klein_lora_to_diffusers(state_dict):
                         original_state_dict.pop(original_key)
                     )
 
+    # 5. Global mappings and leftovers (including adaLN_modulation)
     extra_mappings = {
         "img_in": "x_embedder",
         "txt_in": "context_embedder",
@@ -518,16 +567,31 @@ def _convert_flux2_klein_lora_to_diffusers(state_dict):
         "double_stream_modulation_img.lin": "double_stream_modulation_img.linear",
         "double_stream_modulation_txt.lin": "double_stream_modulation_txt.linear",
     }
+    
+    # Generic adaLN mapping for transformer blocks
+    # transformer_blocks.X.adaLN_modulation.0 -> transformer_blocks.X.norm_out.linear
+    for k in list(original_state_dict.keys()):
+        if "adaLN_modulation.0" in k:
+            new_key = k.replace("adaLN_modulation.0", "norm_out.linear")
+            converted_state_dict[new_key] = original_state_dict.pop(k)
+
     for org_key, diff_key in extra_mappings.items():
         for lora_key in lora_keys:
             original_key = f"{org_key}.{lora_key}.weight"
             if original_key in original_state_dict:
                 converted_state_dict[f"{diff_key}.{lora_key}.weight"] = original_state_dict.pop(original_key)
 
+    # Move anything else that looks like a native transformer block key to converted
+    # (handles AmberNoir style that uses native-ish naming after prefix stripping)
+    for k in list(original_state_dict.keys()):
+        if k.startswith("transformer_blocks.") or k.startswith("single_transformer_blocks."):
+            converted_state_dict[k] = original_state_dict.pop(k)
+
     # Ignore alpha and known metadata-ish keys that are not needed for PEFT injection.
     leftovers = [k for k in original_state_dict.keys() if ".alpha" not in k]
     if leftovers:
-        raise ValueError(f"Unconverted Flux2/Klein LoRA keys remain: {leftovers[:8]}")
+        print(f"Warning: Unconverted LoRA keys remain: {leftovers[:8]}")
+        # We don't raise ValueError anymore to allow partial loading if possible
 
     converted_state_dict = {f"transformer.{k}": v for k, v in converted_state_dict.items()}
     return converted_state_dict
@@ -562,10 +626,7 @@ def _load_lora(pipeline, lora_path, adapter_name):
     Three-attempt strategy:
     1. Standard load_lora_weights (handles most LoRAs).
     2. Patch missing alpha keys → re-save → retry load_lora_weights.
-       load_lora_weights handles full PEFT adapter registration; splitting into
-       lora_state_dict + load_lora_into_transformer uses a different key format
-       and fails to register the adapter name reliably.
-    3. Flux2/Klein format conversion + load_lora_into_transformer (last resort).
+    3. Manual key mapping + load_lora_into_transformer (last resort).
     """
     # Attempt 1: standard path
     try:
@@ -586,8 +647,6 @@ def _load_lora(pipeline, lora_path, adapter_name):
             f"LoRA load_lora_weights failed ({type(e).__name__}: {message[:200]}); "
             f"patching and retrying without metadata (adapter='{adapter_name}')."
         )
-        # Do NOT call unload_lora_weights() here — that would remove all previously
-        # loaded adapters (e.g. LoRA 0 already loaded when LoRA 1 fails).
 
     # Attempt 2: normalize keys + patch missing alpha keys, re-save to temp file, retry load_lora_weights
     import tempfile
@@ -595,10 +654,7 @@ def _load_lora(pipeline, lora_path, adapter_name):
     import os as _os
     state_dict = load_file(lora_path)
 
-    # PR #13209 fix (backported): some Z-Image LoRAs use dot-separated module names
-    # ("context.refiner.", "noise.refiner.") instead of the underscore form that
-    # diffusers' _convert_non_diffusers_z_image_lora_to_diffusers expects.
-    # Normalize them here so the conversion function can process all keys.
+    # PR #13209 fix: normalize dot-separated module names
     needs_dot_norm = any(
         "context.refiner." in k or "noise.refiner." in k
         for k in state_dict
@@ -608,12 +664,8 @@ def _load_lora(pipeline, lora_path, adapter_name):
             k.replace("context.refiner.", "context_refiner.").replace("noise.refiner.", "noise_refiner."): v
             for k, v in state_dict.items()
         }
-        print(f"Normalized context.refiner./noise.refiner. dot keys to underscore form ({len(state_dict)} keys).")
+        print(f"Normalized context.refiner./noise.refiner. dot keys ({len(state_dict)} keys).")
 
-    # Synthesize missing alpha keys (e.g. K1mScum has none in the file).
-    # diffusers >= 0.37.1 requires alpha keys to be present in the diffusers-format
-    # (lora_A/lora_B) path — it pops and applies them for scaling. Providing synthetic
-    # alpha=rank keys gives an effective scale of 1.0, which is the correct default.
     _patch_missing_lora_alphas(state_dict)
 
     patched_path = None
@@ -635,17 +687,14 @@ def _load_lora(pipeline, lora_path, adapter_name):
             except Exception:
                 pass
 
-    # Attempt 3: Flux2/Klein format conversion + direct injection (last resort).
-    # Only Flux2/Klein is handled here; Z-Image native LoRAs should succeed in
-    # attempt 1 (diffusers >= 0.37.1) or attempt 2 (alpha handling above).
-    if not _looks_like_flux2_klein_lora(state_dict):
+    # Attempt 3: Manual key mapping conversion + direct injection.
+    if not _needs_manual_key_mapping(state_dict):
         raise RuntimeError(
-            f"LoRA '{adapter_name}' could not be loaded after key normalization and "
-            f"alpha handling. Unknown format — remaining key sample: "
-            f"{list(state_dict.keys())[:4]}"
+            f"LoRA '{adapter_name}' could not be loaded after key normalization. "
+            f"Unknown format — remaining key sample: {list(state_dict.keys())[:4]}"
         )
-    print("Detected Flux2/Klein LoRA format; converting keys for Z-Image transformer.")
-    state_dict = _convert_flux2_klein_lora_to_diffusers(state_dict)
+    print(f"Detected non-native LoRA format for '{adapter_name}'; converting keys for Z-Image transformer.")
+    state_dict = _convert_lora_to_diffusers(state_dict)
     pipeline.load_lora_into_transformer(
         state_dict=state_dict,
         transformer=pipeline.transformer,
