@@ -6,13 +6,14 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
-- **Photorealism-Oriented Defaults:** Uses 50 steps, `guidance_scale=4.0`, realism-leaning CFG defaults (`cfg_normalization=True`, `cfg_truncation=1.0`), and a built-in negative prompt to suppress common artifacts.
+- **Photorealism-Oriented Defaults:** Uses 50 steps, `guidance_scale=4.0`, and updated quality defaults (`cfg_normalization=False`, `use_beta_sigmas=False`) to match official recommendations and suppress artifacts.
+- **High-Fidelity VAE:** Forces VAE decoding to `float32` to eliminate jagged artifacts and pixelation often seen in high-step `bfloat16` generations.
 - **Flash Attention 2:** Enabled at model load time via `attn_implementation="flash_attention_2"` when the `flash-attn` package is available (RTX 4090/5090 and newer). Falls back to PyTorch SDPA automatically.
-- **FlowMatch Scheduler:** Z-Image uses `FlowMatchEulerDiscreteScheduler` — a flow matching architecture. DPM++, DDIM, Euler Ancestral and other DDPM-era samplers are not compatible. Quality is tuned via `use_beta_sigmas` and `shift`.
+- **FlowMatch Scheduler:** Z-Image uses `FlowMatchEulerDiscreteScheduler` — a flow matching architecture. DPM++, DDIM, Euler Ancestral and other DDPM-era samplers are not compatible.
 - **Consistent Shift Across Passes:** The `shift` parameter is applied to both the base pass and the second-pass refinement scheduler for consistent behavior.
 - **Adaptive VAE Tiling:** Keeps VAE tiling off at 1024-ish outputs by default to reduce potential tile artifacts, while enabling it for larger images.
 - **Optional Two-Pass Refinement:** Upscales pass-1 output with the `4xPurePhoto-RealPLSKR` checkpoint and runs a Z-Image img2img refinement pass for extra detail. Upscaler runs on CUDA when `UPSCALE_USE_CUDA=true` (recommended for 24 GB cards).
-- **Dynamic Multi-LoRA Support:** Load one or more LoRAs from any URL at runtime. Multiple LoRAs are downloaded in parallel and blended by weight. Handles all common LoRA key formats: kohya (`lora_down/lora_up`), diffusers-native (`lora_A/lora_B`), ComfyUI-exported (`diffusion_model.*` prefix), and Flux2/Klein — with automatic alpha-key patching and format conversion.
+- **Dynamic Multi-LoRA Support:** Load one or more LoRAs from any URL at runtime. Multiple LoRAs are downloaded in parallel and blended by weight. Handles all common LoRA key formats: kohya (`lora_down/lora_up`), diffusers-native (`lora_A/lora_B`), ComfyUI-exported (`diffusion_model.*` prefix), OneTrainer/Kohya exports (`lora_unet_` prefix, `context_refiner`, `noise_refiner`), and Flux2/Klein — with automatic alpha-key patching and format conversion.
 - **VRAM-Optimized:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set automatically to reduce allocator fragmentation. Second-pass upscale defaults to 1.25× to stay within 24 GB when LoRAs are loaded.
 - **S3 Integration:** Automatically uploads generated images to an S3-compatible bucket (configured for Backblaze B2).
 
@@ -59,11 +60,11 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `height` | Integer | No | `1024` | Image height in pixels. |
 | `steps` | Integer | No | `50` | Number of inference steps. |
 | `guidance_scale` | Float | No | `4.0` | CFG scale. 4.0–5.5 recommended for photorealism; higher values increase prompt adherence but can over-saturate. |
-| `cfg_normalization` | Boolean | No | `true` | CFG normalization (enabled by default for photorealism). |
+| `cfg_normalization` | Boolean | No | `false` | CFG normalization. Recommended `false` for Z-Image to prevent washed-out results. |
 | `cfg_truncation` | Float | No | `1.0` | CFG truncation. 1.0 recommended; lower to fix over-saturation. |
 | `max_sequence_length` | Integer | No | `512` | Token limit for long prompts. |
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |
-| `use_beta_sigmas` | Boolean | No | `true` | Enables FlowMatch beta-sigma scheduling. Recommended `true` for best quality. |
+| `use_beta_sigmas` | Boolean | No | `false` | Enables FlowMatch beta-sigma scheduling. Recommended `false` for optimal Z-Image noise distribution. |
 | `shift` | Float | No | `3.0` | Scheduler shift applied to **both** base and second-pass schedulers. Lower (2–3) favours fine detail and photorealism; higher (5–7) favours creative composition. 3.0 is the photorealism sweet spot. |
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling (`auto`: enabled only for outputs larger than 1024×1024). |
 
@@ -79,9 +80,9 @@ The second pass upscales the base output with RealPLKSR then runs img2img refine
 | `second_pass_steps` | Integer | No | `20` | Denoising steps for pass 2. |
 | `second_pass_guidance_scale` | Float | No | `4.0` | CFG scale for pass 2. |
 | `second_pass_seed` | Integer | No | `seed` | Seed for pass 2 (defaults to same as base pass). |
-| `second_pass_cfg_normalization` | Boolean | No | `true` | CFG normalization for pass 2. |
+| `second_pass_cfg_normalization` | Boolean | No | `false` | CFG normalization for pass 2. |
 | `second_pass_cfg_truncation` | Float | No | `1.0` | CFG truncation for pass 2. |
-| `second_pass_max_sequence_length` | Integer | No | `min(max_sequence_length, 384)` | Token limit for pass-2 prompt (capped to reduce VRAM pressure). |
+| `second_pass_max_sequence_length` | Integer | No | `512` | Token limit for pass-2 prompt. Synced with base pass for deep prompt understanding. |
 | `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Beta-sigma toggle for pass-2 scheduler. Defaults to the base pass value. |
 | `second_pass_vae_tiling` | Boolean | No | `false` | VAE tiling for pass 2. Disabled by default — tiling causes visible seams at second-pass image sizes. Use slicing instead. |
 | `second_pass_vae_slicing` | Boolean | No | `true` | VAE slicing for pass 2. Enabled by default for VRAM headroom. |
@@ -92,7 +93,7 @@ Z-Image uses `FlowMatchEulerDiscreteScheduler` (flow matching). **DPM++, DDIM, E
 
 | FlowMatch Parameter | Effect |
 |---|---|
-| `use_beta_sigmas=true` | Better sigma distribution — analogous to high-quality DDPM sampler selection |
+| `float32 VAE` | **Enabled.** Automatically eliminates jagged/pixelated artifacts in generations. |
 | `shift=3.0` | Detail/photorealism-focused |
 | `shift=6.0+` | Creative/composition-focused |
 | `steps=50` | Standard quality (30 is acceptable for drafts) |
@@ -115,6 +116,8 @@ https://huggingface.co/<owner>/<repo>/blob/main/<file>.safetensors
 - **Kohya** (`lora_down`/`lora_up` keys) — standard training format
 - **Diffusers-native** (`lora_A`/`lora_B` keys) — diffusers training format
 - **ComfyUI-exported** (`diffusion_model.*` prefix) — LoRAs saved from ComfyUI workflows
+- **OneTrainer/Kohya Generic** (`lora_unet_` prefix, `context_refiner`, `noise_refiner` keys) — supported via manual mapping
+- **Civitai Custom** (`adaLN_modulation` keys, `layers.` prefix) — supported via manual mapping (e.g. AmberNoir)
 - **Flux2/Klein** (`double_blocks`/`single_blocks` keys) — converted automatically
 
 Missing alpha keys are synthesized automatically (alpha=rank, scale=1.0).
