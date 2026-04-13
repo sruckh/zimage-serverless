@@ -178,7 +178,7 @@ def _resolve_use_beta_sigmas(job_input_value):
     Resolve use_beta_sigmas with precedence:
     1) request input
     2) USE_BETA_SIGMAS env var
-    3) default True
+    3) default False (updated for Z-Image quality)
     """
     if job_input_value is not None:
         return _to_bool(job_input_value, default=False)
@@ -187,7 +187,7 @@ def _resolve_use_beta_sigmas(job_input_value):
     if env_raw is not None:
         return _to_bool(env_raw, default=False)
 
-    return True
+    return False
 
 def _free_cuda_cache(stage_label=None):
     if not torch.cuda.is_available():
@@ -754,13 +754,13 @@ def handler(job):
         guidance_scale = float(job_input.get("guidance_scale", 4.0))
         seed = int(job_input.get("seed", 42))
 
-        # Use cfg_normalization=True by default for more photorealistic rendering.
-        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=True)
+        # Use cfg_normalization=False by default to match official Z-Image recommendations.
+        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=False)
         cfg_truncation = float(job_input.get("cfg_truncation", 1.0))
         max_sequence_length = int(job_input.get("max_sequence_length", 512))
 
         # Request/env can explicitly force beta-sigma on/off.
-        # Default behavior is beta-sigmas enabled.
+        # Default behavior is beta-sigmas disabled (updated for quality).
         use_beta_sigmas = _resolve_use_beta_sigmas(job_input.get("use_beta_sigmas"))
 
         # Shift controls the composition vs detail balance in the scheduler.
@@ -783,11 +783,11 @@ def handler(job):
         second_pass_seed = int(job_input.get("second_pass_seed", seed))
         second_pass_cfg_normalization = _to_bool(
             job_input.get("second_pass_cfg_normalization"),
-            default=True,
+            default=False,
         )
         second_pass_cfg_truncation = float(job_input.get("second_pass_cfg_truncation", 1.0))
         second_pass_max_sequence_length = int(
-            job_input.get("second_pass_max_sequence_length", min(max_sequence_length, 384))
+            job_input.get("second_pass_max_sequence_length", max_sequence_length)
         )
         second_pass_use_beta_sigmas = _to_optional_bool(job_input.get("second_pass_use_beta_sigmas"))
         if second_pass_use_beta_sigmas is None:
