@@ -690,6 +690,10 @@ def _load_lora(pipeline, lora_path, adapter_name):
         raise RuntimeError(f"LoRA '{adapter_name}' could not be loaded. Unknown format.")
     print(f"Converting keys for Z-Image transformer.")
     state_dict = _convert_lora_to_diffusers(state_dict)
+    
+    # Force state_dict to bfloat16 to match the base model's dtype and avoid precision mismatch errors.
+    state_dict = {k: v.to(dtype=torch.bfloat16) for k, v in state_dict.items()}
+    
     pipeline.load_lora_into_transformer(
         state_dict=state_dict,
         transformer=pipeline.transformer,
@@ -823,40 +827,50 @@ def handler(job):
 
             adapter_names = [e["name"] for e in lora_entries]
             adapter_weights = [e["scale"] for e in lora_entries]
+            
+            # Re-enforce transformer dtype after LoRA injection to prevent precision mismatch errors.
+            pipeline.transformer.to(dtype=torch.bfloat16)
+            if img2img_pipeline is not None:
+                img2img_pipeline.transformer.to(dtype=torch.bfloat16)
+            
             _activate_loras(pipeline, adapter_names, adapter_weights)
             if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
                 _activate_loras(img2img_pipeline, adapter_names, adapter_weights)
 
         generator = torch.Generator("cuda").manual_seed(seed)
-        result = pipeline(
-            prompt=prompt,
-            negative_prompt=negative_prompt if negative_prompt else None,
-            height=height,
-            width=width,
-            num_inference_steps=steps,
-            guidance_scale=guidance_scale,
-            cfg_normalization=cfg_normalization,
-            cfg_truncation=cfg_truncation,
-            max_sequence_length=max_sequence_length,
-            generator=generator,
-        ).images[0]
+        
+        # Use autocast to handle mixed precision gracefully (Transformer in BF16, VAE in F32).
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            result = pipeline(
+                prompt=prompt,
+                negative_prompt=negative_prompt if negative_prompt else None,
+                height=height,
+                width=width,
+                num_inference_steps=steps,
+                guidance_scale=guidance_scale,
+                cfg_normalization=cfg_normalization,
+                cfg_truncation=cfg_truncation,
+                max_sequence_length=max_sequence_length,
+                generator=generator,
+            ).images[0]
 
         if second_pass_enabled and img2img_pipeline is not None:
             upscaled_image = upscale_image(result, second_pass_upscale)
             _free_cuda_cache("before_second_pass_img2img")
             second_generator = torch.Generator("cuda").manual_seed(second_pass_seed)
-            result = img2img_pipeline(
-                prompt=prompt,
-                image=upscaled_image,
-                negative_prompt=negative_prompt if negative_prompt else None,
-                strength=second_pass_strength,
-                num_inference_steps=second_pass_steps,
-                guidance_scale=second_pass_guidance_scale,
-                cfg_normalization=second_pass_cfg_normalization,
-                cfg_truncation=second_pass_cfg_truncation,
-                max_sequence_length=second_pass_max_sequence_length,
-                generator=second_generator,
-            ).images[0]
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                result = img2img_pipeline(
+                    prompt=prompt,
+                    image=upscaled_image,
+                    negative_prompt=negative_prompt if negative_prompt else None,
+                    strength=second_pass_strength,
+                    num_inference_steps=second_pass_steps,
+                    guidance_scale=second_pass_guidance_scale,
+                    cfg_normalization=second_pass_cfg_normalization,
+                    cfg_truncation=second_pass_cfg_truncation,
+                    max_sequence_length=second_pass_max_sequence_length,
+                    generator=second_generator,
+                ).images[0]
 
         output_filename = f"{uuid.uuid4()}.png"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
