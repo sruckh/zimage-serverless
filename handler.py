@@ -178,16 +178,16 @@ def _resolve_use_beta_sigmas(job_input_value):
     Resolve use_beta_sigmas with precedence:
     1) request input
     2) USE_BETA_SIGMAS env var
-    3) default False (updated for Z-Image quality)
+    3) default True (updated for Z-Image quality and artifact reduction)
     """
     if job_input_value is not None:
-        return _to_bool(job_input_value, default=False)
+        return _to_bool(job_input_value, default=True)
 
     env_raw = os.environ.get("USE_BETA_SIGMAS")
     if env_raw is not None:
-        return _to_bool(env_raw, default=False)
+        return _to_bool(env_raw, default=True)
 
-    return False
+    return True
 
 def _free_cuda_cache(stage_label=None):
     if not torch.cuda.is_available():
@@ -439,17 +439,44 @@ def _convert_lora_to_diffusers(state_dict):
             temp_state_dict[k.replace("lora_down", "lora_A").replace("lora_up", "lora_B")] = v
         original_state_dict = temp_state_dict
 
-    # 2. Handle AmberNoir/Civitai style: layers.X -> transformer_blocks.X
-    # These often use lora_A/lora_B natively but with 'layers.' instead of 'transformer_blocks.'
-    has_layers_prefix = any(k.startswith("layers.") for k in original_state_dict.keys())
-    if has_layers_prefix:
-        temp_state_dict = {}
-        for k, v in original_state_dict.items():
-            if k.startswith("layers."):
-                temp_state_dict[k.replace("layers.", "transformer_blocks.", 1)] = v
-            else:
-                temp_state_dict[k] = v
-        original_state_dict = temp_state_dict
+    # 2. Handle AmberNoir/Civitai style: layers.X -> layers.X (if using native naming)
+    # or transformer_blocks.X -> layers.X.
+    # Note: ZImageTransformer2DModel uses `layers` for main blocks and `noise_refiner.layers` for refiner blocks.
+    for k in list(original_state_dict.keys()):
+        # Map transformer_blocks.N to layers.N
+        if k.startswith("transformer_blocks."):
+            new_key = k.replace("transformer_blocks.", "layers.", 1)
+            original_state_dict[new_key] = original_state_dict.pop(k)
+        # Also map generic 'layers.N' if they exist but were intended for 'layers'
+        elif k.startswith("layers."):
+            # Already matches the likely attribute name
+            pass
+
+    # 2b. Standardize internal block names: attention -> attn, feed_forward -> ffn
+    # ZImageTransformerBlock uses self.attn and self.ffn.
+    for k in list(original_state_dict.keys()):
+        new_key = k
+        if ".attention." in new_key:
+            new_key = new_key.replace(".attention.", ".attn.", 1)
+        if ".feed_forward." in new_key:
+            new_key = new_key.replace(".feed_forward.", ".ffn.", 1)
+        
+        # Map sub-layer projections if needed (w1, w2, w3 -> fc1, fc2 etc might be needed if not standard)
+        # However, the error showed .w1, .w2 etc. 
+        # If ZImageFeedForward uses fc1/fc2, we need to map those too.
+        # Based on search, it uses fc1 and fc2.
+        if ".ffn.w1" in new_key:
+            new_key = new_key.replace(".ffn.w1", ".ffn.fc1", 1)
+        if ".ffn.w2" in new_key:
+            new_key = new_key.replace(".ffn.w2", ".ffn.fc2", 1)
+        if ".ffn.w3" in new_key: # Some use w3 for gate, some use fc1 chunk.
+            # If it's a SwiGLU with w1, w2, w3, it usually maps to fc1/fc2 structure.
+            # ZImageFeedForward uses fc1 (chunked) and fc2.
+            # We'll leave w3 for now or map to fc1 if it's the gate.
+            pass
+
+        if new_key != k:
+            original_state_dict[new_key] = original_state_dict.pop(k)
 
     # 3. Handle Kohya/OneTrainer style context_refiner/noise_refiner
     # lora_unet_context_refiner_X_attention_out -> context_refiner.X.attn.to_out.0
@@ -750,12 +777,25 @@ def handler(job):
         )
         width = int(job_input.get("width", 1024))
         height = int(job_input.get("height", 1024))
-        steps = int(job_input.get("steps", 50))
-        guidance_scale = float(job_input.get("guidance_scale", 4.0))
+        steps = job_input.get("steps")
+        guidance_scale = job_input.get("guidance_scale")
+
+        # Automatic model-specific optimization
+        is_turbo = "turbo" in MODEL_ID.lower()
+        if steps is None:
+            steps = 8 if is_turbo else 50
+        else:
+            steps = int(steps)
+            
+        if guidance_scale is None:
+            guidance_scale = 1.0 if is_turbo else 4.0
+        else:
+            guidance_scale = float(guidance_scale)
+
         seed = int(job_input.get("seed", 42))
 
-        # Use cfg_normalization=False by default to match official Z-Image recommendations.
-        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=False)
+        # Use cfg_normalization=True by default for photorealistic quality (Z-Image recommendation).
+        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=True)
         cfg_truncation = float(job_input.get("cfg_truncation", 1.0))
         max_sequence_length = int(job_input.get("max_sequence_length", 512))
 
