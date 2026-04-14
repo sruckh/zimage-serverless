@@ -242,6 +242,10 @@ def get_pipeline():
 
         pipe.to("cuda")
 
+        # Force VAE to float32 to eliminate decoding artifacts (jagged edges/pixelation)
+        # common in bfloat16 VAE decoding.
+        pipe.vae.to(dtype=torch.float32)
+
         # Optional: torch.compile for faster inference after first warm-up request
         if _to_bool(os.environ.get("TORCH_COMPILE"), default=False):
             try:
