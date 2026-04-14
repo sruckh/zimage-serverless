@@ -6,7 +6,7 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
-- **Photorealism-Oriented Defaults:** Uses high-quality defaults (`cfg_normalization=True`, `use_beta_sigmas=True`) and automatic step/guidance optimization based on the model variant (Base vs Turbo) to suppress artifacts.
+- **Photorealism-Oriented Defaults:** Uses official recommendations (40 steps, `shift=1.0`) and automatic step/guidance optimization based on the model variant (Base vs Turbo) to ensure stable, high-quality results.
 - **High-Fidelity VAE:** Forces VAE decoding to `float32` to eliminate jagged artifacts and pixelation often seen in high-step `bfloat16` generations.
 - **Flash Attention 2:** Enabled at model load time via `attn_implementation="flash_attention_2"` when the `flash-attn` package is available (RTX 4090/5090 and newer). Falls back to PyTorch SDPA automatically.
 - **FlowMatch Scheduler:** Z-Image uses `FlowMatchEulerDiscreteScheduler` — a flow matching architecture. DPM++, DDIM, Euler Ancestral and other DDPM-era samplers are not compatible.
@@ -58,14 +58,14 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `negative_prompt` | String | No | *(see below)* | Text to avoid in the generation. A photorealism-oriented default is applied when omitted; pass `""` to disable. |
 | `width` | Integer | No | `1024` | Image width in pixels. |
 | `height` | Integer | No | `1024` | Image height in pixels. |
-| `steps` | Integer | No | `auto` | Number of inference steps. Auto-optimizes to `50` (Base) or `8` (Turbo) when omitted. |
-| `guidance_scale` | Float | No | `auto` | CFG scale. Auto-optimizes to `4.0` (Base) or `1.0` (Turbo) when omitted. 4.0–5.5 recommended for Base photorealism. |
-| `cfg_normalization` | Boolean | No | `true` | CFG normalization. Recommended `true` for photorealistic results to prevent over-saturation. |
+| `steps` | Integer | No | `auto` | Number of inference steps. Auto-optimizes to `40` (Base) or `9` (Turbo) when omitted. |
+| `guidance_scale` | Float | No | `auto` | CFG scale. Auto-optimizes to `4.0` (Base) or `0.0` (Turbo) when omitted. 3.0–5.0 recommended for Base photorealism. |
+| `cfg_normalization` | Boolean | No | `false` | CFG normalization. Recommended `false` for stable Z-Image results. |
 | `cfg_truncation` | Float | No | `1.0` | CFG truncation. 1.0 recommended; lower to fix over-saturation. |
 | `max_sequence_length` | Integer | No | `512` | Token limit for long prompts. |
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |
-| `use_beta_sigmas` | Boolean | No | `true` | Enables FlowMatch beta-sigma scheduling. Recommended `true` for optimal Z-Image noise distribution and artifact reduction. |
-| `shift` | Float | No | `3.0` | Scheduler shift applied to **both** base and second-pass schedulers. Lower (2–3) favours fine detail and photorealism; higher (5–7) favours creative composition. 3.0 is the photorealism sweet spot. |
+| `use_beta_sigmas` | Boolean | No | `false` | Enables FlowMatch beta-sigma scheduling. Recommended `false` for official Z-Image noise distribution. |
+| `shift` | Float | No | `1.0` | Scheduler shift. 1.0 is the official default for Z-Image architecture. Adjust if specifically required by a specialized LoRA. |
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling (`auto`: enabled only for outputs larger than 1024×1024). |
 
 ### Second Pass (Upscale + Refinement) Parameters
@@ -94,9 +94,8 @@ Z-Image uses `FlowMatchEulerDiscreteScheduler` (flow matching). **DPM++, DDIM, E
 | FlowMatch Parameter | Effect |
 |---|---|
 | `float32 VAE` | **Enabled.** Automatically eliminates jagged/pixelated artifacts in generations. |
-| `shift=3.0` | Detail/photorealism-focused |
-| `shift=6.0+` | Creative/composition-focused |
-| `steps=50` | Standard quality (30 is acceptable for drafts) |
+| `shift=1.0` | Official default for photorealistic fidelity. |
+| `steps=40` | Sweet spot for Base model detail. |
 
 ## LoRA URL Format
 
@@ -148,9 +147,9 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
     "lora_scale": 0.9,
     "width": 1024,
     "height": 1024,
-    "steps": 50,
+    "steps": 40,
     "guidance_scale": 4.5,
-    "shift": 3.0,
+    "shift": 1.0,
     "seed": 12345
   }
 }
@@ -168,9 +167,9 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
     ],
     "width": 1024,
     "height": 1024,
-    "steps": 50,
+    "steps": 40,
     "guidance_scale": 4.5,
-    "shift": 3.0,
+    "shift": 1.0,
     "second_pass_strength": 0.15,
     "seed": 12345
   }
@@ -185,9 +184,9 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
     "prompt": "A photorealistic landscape at golden hour",
     "width": 1024,
     "height": 1024,
-    "steps": 50,
+    "steps": 40,
     "guidance_scale": 4.0,
-    "shift": 3.0,
+    "shift": 1.0,
     "seed": 42
   }
 }

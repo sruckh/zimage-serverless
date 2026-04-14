@@ -153,7 +153,7 @@ def _configure_scheduler(pipeline, use_beta_sigmas, shift=None):
     and adjusting the shift parameter (controls composition vs detail balance).
     """
     current_use_beta_sigmas = bool(pipeline.scheduler.config.get("use_beta_sigmas", False))
-    current_shift = float(pipeline.scheduler.config.get("shift", 3.0))
+    current_shift = float(pipeline.scheduler.config.get("shift", 1.0))
     target_shift = shift if shift is not None else current_shift
 
     if current_use_beta_sigmas == use_beta_sigmas and abs(current_shift - target_shift) < 1e-6:
@@ -178,16 +178,16 @@ def _resolve_use_beta_sigmas(job_input_value):
     Resolve use_beta_sigmas with precedence:
     1) request input
     2) USE_BETA_SIGMAS env var
-    3) default True (updated for Z-Image quality and artifact reduction)
+    3) default False (reverted to False for better stability on Z-Image)
     """
     if job_input_value is not None:
-        return _to_bool(job_input_value, default=True)
+        return _to_bool(job_input_value, default=False)
 
     env_raw = os.environ.get("USE_BETA_SIGMAS")
     if env_raw is not None:
-        return _to_bool(env_raw, default=True)
+        return _to_bool(env_raw, default=False)
 
-    return True
+    return False
 
 def _free_cuda_cache(stage_label=None):
     if not torch.cuda.is_available():
@@ -462,18 +462,10 @@ def _convert_lora_to_diffusers(state_dict):
             new_key = new_key.replace(".feed_forward.", ".ffn.", 1)
         
         # Map sub-layer projections if needed (w1, w2, w3 -> fc1, fc2 etc might be needed if not standard)
-        # However, the error showed .w1, .w2 etc. 
-        # If ZImageFeedForward uses fc1/fc2, we need to map those too.
-        # Based on search, it uses fc1 and fc2.
         if ".ffn.w1" in new_key:
             new_key = new_key.replace(".ffn.w1", ".ffn.fc1", 1)
         if ".ffn.w2" in new_key:
             new_key = new_key.replace(".ffn.w2", ".ffn.fc2", 1)
-        if ".ffn.w3" in new_key: # Some use w3 for gate, some use fc1 chunk.
-            # If it's a SwiGLU with w1, w2, w3, it usually maps to fc1/fc2 structure.
-            # ZImageFeedForward uses fc1 (chunked) and fc2.
-            # We'll leave w3 for now or map to fc1 if it's the gate.
-            pass
 
         if new_key != k:
             original_state_dict[new_key] = original_state_dict.pop(k)
@@ -618,18 +610,12 @@ def _convert_lora_to_diffusers(state_dict):
     leftovers = [k for k in original_state_dict.keys() if ".alpha" not in k]
     if leftovers:
         print(f"Warning: Unconverted LoRA keys remain: {leftovers[:8]}")
-        # We don't raise ValueError anymore to allow partial loading if possible
 
     converted_state_dict = {f"transformer.{k}": v for k, v in converted_state_dict.items()}
     return converted_state_dict
 
 def _patch_missing_lora_alphas(state_dict):
-    """Add missing alpha keys for LoRA entries that omit them.
-
-    Handles both lora_down/lora_up (kohya/non-diffusers) and lora_A/lora_B
-    (diffusers-native) naming conventions.  When alpha is absent the convention
-    is alpha = rank, giving an effective scaling of 1.0.
-    """
+    """Add missing alpha keys for LoRA entries that omit them."""
     import re as _re
     alpha_added = 0
     for key in list(state_dict.keys()):
@@ -646,15 +632,7 @@ def _patch_missing_lora_alphas(state_dict):
 
 
 def _load_lora(pipeline, lora_path, adapter_name):
-    """
-    Load a single LoRA adapter onto the pipeline by adapter_name.
-    Does NOT activate it — call _activate_loras() after all LoRAs are loaded.
-
-    Three-attempt strategy:
-    1. Standard load_lora_weights (handles most LoRAs).
-    2. Patch missing alpha keys → re-save → retry load_lora_weights.
-    3. Manual key mapping + load_lora_into_transformer (last resort).
-    """
+    """Load a single LoRA adapter onto the pipeline by adapter_name."""
     # Attempt 1: standard path
     try:
         pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
@@ -663,35 +641,27 @@ def _load_lora(pipeline, lora_path, adapter_name):
         message = str(e)
         is_recoverable = (
             ("Target modules" in message and "not found in the base model" in message)
-            or ("No modules were targeted" in message)       # metadata target_modules mismatch
-            or ("state_dict` should be empty" in message)   # unconsumed keys (e.g. context_refiner.*)
+            or ("No modules were targeted" in message)
+            or ("state_dict` should be empty" in message)
             or isinstance(e, KeyError)
             or "alpha" in message
         )
         if not is_recoverable or not hasattr(pipeline, "load_lora_into_transformer"):
             raise
-        print(
-            f"LoRA load_lora_weights failed ({type(e).__name__}: {message[:200]}); "
-            f"patching and retrying without metadata (adapter='{adapter_name}')."
-        )
+        print(f"LoRA load failed; trying format conversion.")
 
-    # Attempt 2: normalize keys + patch missing alpha keys, re-save to temp file, retry load_lora_weights
+    # Attempt 2: normalize keys + patch missing alpha keys
     import tempfile
     from safetensors.torch import load_file, save_file as _save_file
     import os as _os
     state_dict = load_file(lora_path)
 
-    # PR #13209 fix: normalize dot-separated module names
-    needs_dot_norm = any(
-        "context.refiner." in k or "noise.refiner." in k
-        for k in state_dict
-    )
+    needs_dot_norm = any("context.refiner." in k or "noise.refiner." in k for k in state_dict)
     if needs_dot_norm:
         state_dict = {
             k.replace("context.refiner.", "context_refiner.").replace("noise.refiner.", "noise_refiner."): v
             for k, v in state_dict.items()
         }
-        print(f"Normalized context.refiner./noise.refiner. dot keys ({len(state_dict)} keys).")
 
     _patch_missing_lora_alphas(state_dict)
 
@@ -702,11 +672,8 @@ def _load_lora(pipeline, lora_path, adapter_name):
         _save_file(state_dict, patched_path)
         pipeline.load_lora_weights(patched_path, adapter_name=adapter_name)
         return
-    except Exception as e:
-        print(
-            f"load_lora_weights (patched) failed ({type(e).__name__}: {str(e)[:150]}); "
-            f"trying format conversion."
-        )
+    except Exception:
+        print(f"load_lora_weights (patched) failed; trying format conversion.")
     finally:
         if patched_path:
             try:
@@ -716,11 +683,8 @@ def _load_lora(pipeline, lora_path, adapter_name):
 
     # Attempt 3: Manual key mapping conversion + direct injection.
     if not _needs_manual_key_mapping(state_dict):
-        raise RuntimeError(
-            f"LoRA '{adapter_name}' could not be loaded after key normalization. "
-            f"Unknown format — remaining key sample: {list(state_dict.keys())[:4]}"
-        )
-    print(f"Detected non-native LoRA format for '{adapter_name}'; converting keys for Z-Image transformer.")
+        raise RuntimeError(f"LoRA '{adapter_name}' could not be loaded. Unknown format.")
+    print(f"Converting keys for Z-Image transformer.")
     state_dict = _convert_lora_to_diffusers(state_dict)
     pipeline.load_lora_into_transformer(
         state_dict=state_dict,
@@ -732,33 +696,18 @@ def _load_lora(pipeline, lora_path, adapter_name):
 
 
 def _activate_loras(pipeline, adapter_names, adapter_scales):
-    """
-    Activate one or more loaded LoRA adapters with their respective scales.
-    Must be called after all _load_lora() calls are complete.
-
-    With a single LoRA this is equivalent to set_adapters([name], [scale]).
-    With multiple LoRAs the cat-method blending applies:
-        h = W0·x + sum(scale_i * alpha_i/rank_i * B_i·A_i·x)
-    Weights are independent multipliers — not normalised — so [1.0, 0.25]
-    gives a true 4:1 influence ratio (assuming equal internal scalings).
-    """
+    """Activate one or more loaded LoRA adapters."""
     pipeline.set_adapters(adapter_names, adapter_weights=adapter_scales)
 
 def handler(job):
-    """
-    The main RunPod serverless handler.
-    """
+    """The main RunPod serverless handler."""
     try:
         job_input = job.get("input", {})
 
-        # 1. Parse Input with Defaults
         prompt = job_input.get("prompt")
         if not prompt:
             return {"error": "Missing 'prompt' in input."}
 
-        # Multi-LoRA input: prefer `loras` array; fall back to legacy lora_url/lora_scale.
-        # loras format: [{"url": "https://...", "scale": 1.0}, ...]
-        # scale is optional per entry (defaults to 0.85). 0 or 1 entries are fine.
         loras_raw = job_input.get("loras")
         lora_url = job_input.get("lora_url")
         lora_scale = float(job_input.get("lora_scale", 0.85))
@@ -780,158 +729,101 @@ def handler(job):
         steps = job_input.get("steps")
         guidance_scale = job_input.get("guidance_scale")
 
-        # Automatic model-specific optimization
+        # Official model-specific optimization
         is_turbo = "turbo" in MODEL_ID.lower()
         if steps is None:
-            steps = 8 if is_turbo else 50
+            steps = 9 if is_turbo else 40
         else:
             steps = int(steps)
             
         if guidance_scale is None:
-            guidance_scale = 1.0 if is_turbo else 4.0
+            # Turbo models MUST use low CFG (often 0.0) to prevent collapse
+            guidance_scale = 0.0 if is_turbo else 4.0
         else:
             guidance_scale = float(guidance_scale)
 
         seed = int(job_input.get("seed", 42))
 
-        # Use cfg_normalization=True by default for photorealistic quality (Z-Image recommendation).
-        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=True)
+        # Reverted to False for better stability (only enable if specifically requested)
+        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=False)
         cfg_truncation = float(job_input.get("cfg_truncation", 1.0))
         max_sequence_length = int(job_input.get("max_sequence_length", 512))
 
-        # Request/env can explicitly force beta-sigma on/off.
-        # Default behavior is beta-sigmas disabled (updated for quality).
         use_beta_sigmas = _resolve_use_beta_sigmas(job_input.get("use_beta_sigmas"))
 
-        # Shift controls the composition vs detail balance in the scheduler.
-        # Higher values (5-7) favour creative composition; lower (1-2) favour detail.
-        # Z-Image default is ~3.0. 3.0-3.5 is a good photorealism sweet spot.
+        # Shift 1.0 is the official default for Z-Image / Lumina architecture.
         shift = job_input.get("shift")
-        if shift is not None:
+        if shift is None:
+            shift = 1.0
+        else:
             shift = float(shift)
 
-        # Optional second-pass refinement: upscale + Z-Image img2img
+        # Optional second-pass refinement
         second_pass_enabled_default = _to_bool(os.environ.get("SECOND_PASS_DEFAULT_ENABLED"), default=True)
-        second_pass_enabled = _to_bool(
-            job_input.get("second_pass_enabled"),
-            default=second_pass_enabled_default,
-        )
+        second_pass_enabled = _to_bool(job_input.get("second_pass_enabled"), default=second_pass_enabled_default)
         second_pass_upscale = float(job_input.get("second_pass_upscale", 1.25))
         second_pass_strength = float(job_input.get("second_pass_strength", 0.30))
         second_pass_steps = int(job_input.get("second_pass_steps", 20))
         second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 4.0))
         second_pass_seed = int(job_input.get("second_pass_seed", seed))
-        second_pass_cfg_normalization = _to_bool(
-            job_input.get("second_pass_cfg_normalization"),
-            default=False,
-        )
+        second_pass_cfg_normalization = _to_bool(job_input.get("second_pass_cfg_normalization"), default=False)
         second_pass_cfg_truncation = float(job_input.get("second_pass_cfg_truncation", 1.0))
-        second_pass_max_sequence_length = int(
-            job_input.get("second_pass_max_sequence_length", max_sequence_length)
-        )
+        second_pass_max_sequence_length = int(job_input.get("second_pass_max_sequence_length", max_sequence_length))
         second_pass_use_beta_sigmas = _to_optional_bool(job_input.get("second_pass_use_beta_sigmas"))
         if second_pass_use_beta_sigmas is None:
             second_pass_use_beta_sigmas = use_beta_sigmas
 
-        # Keep VAE tiling off at 1024-ish outputs unless explicitly requested.
         vae_tiling_input = job_input.get("vae_tiling")
-        if vae_tiling_input is None:
-            vae_tiling = (width * height) > (1024 * 1024)
-        else:
-            vae_tiling = _to_bool(vae_tiling_input, default=False)
+        vae_tiling = _to_bool(vae_tiling_input, default=(width * height) > (1024 * 1024)) if vae_tiling_input is not None else (width * height) > (1024 * 1024)
 
-        second_pass_vae_tiling_input = job_input.get("second_pass_vae_tiling")
-        if second_pass_vae_tiling_input is None:
-            second_pass_vae_tiling = False  # Tiling causes visible seams at second-pass sizes; use slicing only
-        else:
-            second_pass_vae_tiling = _to_bool(second_pass_vae_tiling_input, default=False)
+        second_pass_vae_tiling = _to_bool(job_input.get("second_pass_vae_tiling"), default=False)
         second_pass_vae_slicing = _to_bool(job_input.get("second_pass_vae_slicing"), default=True)
         
-        # Unique prefix for this request's adapter names to avoid PEFT collisions
         request_id = str(uuid.uuid4())[:8]
 
-        # 2. Setup Pipeline
         pipeline = get_pipeline()
         img2img_pipeline = get_img2img_pipeline() if second_pass_enabled else None
-        if use_beta_sigmas is not None:
+        if use_beta_sigmas is not None or shift is not None:
             _configure_scheduler(pipeline, use_beta_sigmas, shift=shift)
         if img2img_pipeline is not None:
-            if second_pass_use_beta_sigmas is not None:
-                _configure_scheduler(img2img_pipeline, second_pass_use_beta_sigmas, shift=shift)
+            _configure_scheduler(img2img_pipeline, second_pass_use_beta_sigmas, shift=shift)
 
         if vae_tiling:
             pipeline.vae.enable_tiling()
         else:
             pipeline.vae.disable_tiling()
-        if img2img_pipeline is not None:
-            if second_pass_vae_tiling:
-                img2img_pipeline.vae.enable_tiling()
-            else:
-                img2img_pipeline.vae.disable_tiling()
-            if second_pass_vae_slicing:
-                img2img_pipeline.vae.enable_slicing()
-            else:
-                img2img_pipeline.vae.disable_slicing()
-        print(
-            f"Inference controls: use_beta_sigmas={use_beta_sigmas}, "
-            f"cfg_normalization={cfg_normalization}, cfg_truncation={cfg_truncation}, "
-            f"vae_tiling={vae_tiling}, second_pass_enabled={second_pass_enabled}, "
-            f"second_pass_vae_tiling={second_pass_vae_tiling}, "
-            f"second_pass_vae_slicing={second_pass_vae_slicing}, "
-            f"second_pass_max_sequence_length={second_pass_max_sequence_length}"
-        )
         
-        # 3. Handle LoRA - Clean start every time to prevent artifacts and "smearing"
-        # CRITICAL: In a persistent worker, we must unload old weights before loading new ones
-        print("Unloading any existing LoRA weights for a clean slate...")
+        if img2img_pipeline is not None:
+            if second_pass_vae_tiling: img2img_pipeline.vae.enable_tiling()
+            else: img2img_pipeline.vae.disable_tiling()
+            if second_pass_vae_slicing: img2img_pipeline.vae.enable_slicing()
+            else: img2img_pipeline.vae.disable_slicing()
+
         pipeline.unload_lora_weights()
         if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
             img2img_pipeline.unload_lora_weights()
 
-        # Assign stable adapter names for this request
-        lora_entries = [
-            {
-                "url": lora["url"],
-                "scale": lora["scale"],
-                "name": f"adapter_{request_id}_{i}",
-                "path": None,
-            }
-            for i, lora in enumerate(lora_list)
-        ]
+        lora_entries = [{"url": lora["url"], "scale": lora["scale"], "name": f"adapter_{request_id}_{i}", "path": None} for i, lora in enumerate(lora_list)]
 
         if lora_entries:
-            # Download all LoRAs in parallel — each to its own /tmp file
             def _download(entry):
                 entry["path"] = download_lora(entry["url"])
                 return entry
+            with ThreadPoolExecutor(max_workers=len(lora_entries)) as pool:
+                list(pool.map(_download, lora_entries))
 
-            if len(lora_entries) == 1:
-                _download(lora_entries[0])
-            else:
-                with ThreadPoolExecutor(max_workers=len(lora_entries)) as pool:
-                    futures = {pool.submit(_download, e): e for e in lora_entries}
-                    for future in as_completed(futures):
-                        future.result()  # re-raises any download exception
-
-            # Load all LoRAs first, then activate in one set_adapters call
             for entry in lora_entries:
-                print(f"Loading LoRA '{entry['name']}' from {entry['path']} (scale={entry['scale']})")
                 _load_lora(pipeline, entry["path"], entry["name"])
                 if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
                     _load_lora(img2img_pipeline, entry["path"], entry["name"])
 
             adapter_names = [e["name"] for e in lora_entries]
-            adapter_scales = [e["scale"] for e in lora_entries]
-            _activate_loras(pipeline, adapter_names, adapter_scales)
+            adapter_weights = [e["scale"] for e in lora_entries]
+            _activate_loras(pipeline, adapter_names, adapter_weights)
             if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
-                _activate_loras(img2img_pipeline, adapter_names, adapter_scales)
+                _activate_loras(img2img_pipeline, adapter_names, adapter_weights)
 
-            print(f"Loaded {len(lora_entries)} LoRA(s): {list(zip(adapter_names, adapter_scales))}")
-
-        # 4. Generate Image
         generator = torch.Generator("cuda").manual_seed(seed)
-        print(f"Generating image: prompt='{prompt}', size={width}x{height}, seed={seed}, scale={guidance_scale}")
-        
         result = pipeline(
             prompt=prompt,
             negative_prompt=negative_prompt if negative_prompt else None,
@@ -945,13 +837,7 @@ def handler(job):
             generator=generator,
         ).images[0]
 
-        # 4b. Optional second pass: upscale then refine with img2img
         if second_pass_enabled and img2img_pipeline is not None:
-            print(
-                "Running second pass refinement "
-                f"(upscale={second_pass_upscale}, strength={second_pass_strength}, "
-                f"steps={second_pass_steps}, guidance={second_pass_guidance_scale})"
-            )
             upscaled_image = upscale_image(result, second_pass_upscale)
             _free_cuda_cache("before_second_pass_img2img")
             second_generator = torch.Generator("cuda").manual_seed(second_pass_seed)
@@ -968,27 +854,18 @@ def handler(job):
                 generator=second_generator,
             ).images[0]
 
-        # 5. Save as lossless PNG for maximum image fidelity
         output_filename = f"{uuid.uuid4()}.png"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
         result.save(output_path, format="PNG")
-        print(f"Image saved to {output_path}")
-
-        # 6. Upload to S3
         s3_url = upload_image_to_s3(output_path, output_filename)
-        print(f"Image uploaded to S3: {s3_url}")
 
-        # 7. Cleanup (Ephemeral Storage)
         for entry in lora_entries:
-            if entry["path"] and os.path.exists(entry["path"]):
-                os.remove(entry["path"])
-        if os.path.exists(output_path):
-            os.remove(output_path)
+            if entry["path"] and os.path.exists(entry["path"]): os.remove(entry["path"])
+        if os.path.exists(output_path): os.remove(output_path)
 
         return {"image_url": s3_url}
 
     except Exception as e:
-        print(f"Error in handler: {repr(e)}")
         traceback.print_exc()
         return {"error": str(e)}
 
