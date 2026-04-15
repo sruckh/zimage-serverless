@@ -7,6 +7,7 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
 - **Photorealism-Oriented Defaults:** Uses official recommendations (40 steps, `shift=1.0`) and automatic step/guidance optimization based on the model variant (Base vs Turbo) to ensure stable, high-quality results.
+- **Stable Mixed-Precision Inference:** Automatically handles `bfloat16` transformer weights and `float32` VAE decoding via `torch.autocast`. LoRA weights are explicitly cast to the model's native precision at load time to prevent "bias type mismatch" errors.
 - **High-Fidelity VAE:** Forces VAE decoding to `float32` to eliminate jagged artifacts and pixelation often seen in high-step `bfloat16` generations.
 - **Flash Attention 2:** Enabled at model load time via `attn_implementation="flash_attention_2"` when the `flash-attn` package is available (RTX 4090/5090 and newer). Falls back to PyTorch SDPA automatically.
 - **FlowMatch Scheduler:** Z-Image uses `FlowMatchEulerDiscreteScheduler` — a flow matching architecture. DPM++, DDIM, Euler Ancestral and other DDPM-era samplers are not compatible.
