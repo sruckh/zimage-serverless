@@ -222,46 +222,38 @@ def get_pipeline():
     global pipe
     if pipe is None:
         hf_token = os.environ.get("HF_TOKEN")
+        print(f"Loading base model: {MODEL_ID}")
+        try:
+            pipe = ZImagePipeline.from_pretrained(
+                MODEL_ID,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                token=hf_token if hf_token else None,
+                attn_implementation="flash_attention_2",
+            )
+            print("Model loaded with Flash Attention 2.")
+        except Exception as e:
+            print(f"Flash Attention 2 unavailable ({type(e).__name__}); loading with default attention.")
+            pipe = ZImagePipeline.from_pretrained(
+                MODEL_ID,
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                token=hf_token if hf_token else None,
+            )
+
         if os.path.isfile(CHECKPOINT_PATH):
-            print(f"Loading model from local checkpoint: {CHECKPOINT_PATH}")
-            try:
-                pipe = ZImagePipeline.from_single_file(
-                    CHECKPOINT_PATH,
-                    torch_dtype=torch.bfloat16,
-                    low_cpu_mem_usage=True,
-                    config=MODEL_ID,
-                    token=hf_token if hf_token else None,
-                    attn_implementation="flash_attention_2",
-                )
-                print("Checkpoint loaded with Flash Attention 2.")
-            except Exception as e:
-                print(f"Flash Attention 2 unavailable ({type(e).__name__}); loading checkpoint with default attention.")
-                pipe = ZImagePipeline.from_single_file(
-                    CHECKPOINT_PATH,
-                    torch_dtype=torch.bfloat16,
-                    low_cpu_mem_usage=True,
-                    config=MODEL_ID,
-                    token=hf_token if hf_token else None,
-                )
+            print(f"Loading transformer weights from checkpoint: {CHECKPOINT_PATH}")
+            from safetensors.torch import load_file as safetensors_load_file
+            state_dict = safetensors_load_file(CHECKPOINT_PATH)
+            missing, unexpected = pipe.transformer.load_state_dict(state_dict, strict=False)
+            if missing:
+                print(f"Checkpoint missing keys (using base weights): {len(missing)}")
+            if unexpected:
+                print(f"Checkpoint unexpected keys (ignored): {len(unexpected)}")
+            pipe.transformer.to(dtype=torch.bfloat16)
+            print("Checkpoint weights loaded into transformer.")
         else:
-            print(f"Checkpoint not found at {CHECKPOINT_PATH}, falling back to HF model: {MODEL_ID}")
-            try:
-                pipe = ZImagePipeline.from_pretrained(
-                    MODEL_ID,
-                    torch_dtype=torch.bfloat16,
-                    low_cpu_mem_usage=True,
-                    token=hf_token if hf_token else None,
-                    attn_implementation="flash_attention_2",
-                )
-                print("Model loaded with Flash Attention 2.")
-            except Exception as e:
-                print(f"Flash Attention 2 unavailable ({type(e).__name__}); loading with default attention.")
-                pipe = ZImagePipeline.from_pretrained(
-                    MODEL_ID,
-                    torch_dtype=torch.bfloat16,
-                    low_cpu_mem_usage=True,
-                    token=hf_token if hf_token else None,
-                )
+            print(f"No checkpoint found at {CHECKPOINT_PATH}, using base model weights.")
 
         pipe.to("cuda")
 
@@ -269,7 +261,6 @@ def get_pipeline():
         # common in bfloat16 VAE decoding.
         pipe.vae.to(dtype=torch.float32)
 
-        # Optional: torch.compile for faster inference after first warm-up request
         if _to_bool(os.environ.get("TORCH_COMPILE"), default=False):
             try:
                 print("Compiling transformer with torch.compile (first request will be slower)...")
