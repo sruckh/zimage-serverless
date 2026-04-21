@@ -47,5 +47,24 @@ else
     echo "Upscaler model already cached: $UPSCALE_MODEL_PATH"
 fi
 
+# Ensure the famegridZIB checkpoint exists on volume even when base install is already complete.
+FAMEGRID_CHECKPOINT_PATH="/runpod-volume/zimage-diffusion/models/checkpoints/famegridZIB_v10.safetensors"
+mkdir -p "$(dirname "$FAMEGRID_CHECKPOINT_PATH")"
+if [ ! -f "$FAMEGRID_CHECKPOINT_PATH" ]; then
+    if [ -n "$CIVITAI_TOKEN" ]; then
+        echo "Downloading famegridZIB_v10 checkpoint to volume: $FAMEGRID_CHECKPOINT_PATH"
+        wget "https://civitai.com/api/download/models/2847800?token=${CIVITAI_TOKEN}" \
+            -O "${FAMEGRID_CHECKPOINT_PATH}.tmp" \
+            --tries=3 \
+            --show-progress && \
+            mv "${FAMEGRID_CHECKPOINT_PATH}.tmp" "$FAMEGRID_CHECKPOINT_PATH" || \
+            echo "WARNING: famegridZIB_v10 download failed — check CIVITAI_TOKEN and connectivity."
+    else
+        echo "WARNING: CIVITAI_TOKEN not set, skipping famegridZIB_v10 checkpoint download."
+    fi
+else
+    echo "famegridZIB_v10 checkpoint already cached: $FAMEGRID_CHECKPOINT_PATH"
+fi
+
 echo "Starting RunPod Handler..."
 exec python3 handler.py

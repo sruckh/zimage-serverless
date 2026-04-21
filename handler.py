@@ -22,7 +22,11 @@ print(f"--- Initializing Handler (Imports took {time.time() - t_start:.2f}s) ---
 
 # Environment Variables
 MODEL_ID = os.environ.get("MODEL_ID", "Tongyi-MAI/Z-Image")
-MODEL_DIR = "/runpod-volume/zimage-diffusion/models" # Runpod volume location
+MODEL_DIR = "/runpod-volume/zimage-diffusion/models"
+CHECKPOINT_PATH = os.environ.get(
+    "CHECKPOINT_PATH",
+    "/runpod-volume/zimage-diffusion/models/checkpoints/famegridZIB_v10.safetensors",
+) # Runpod volume location
 OUTPUT_DIR = "/tmp/outputs"
 
 # Ensure output directory exists
@@ -218,27 +222,46 @@ def get_pipeline():
     global pipe
     if pipe is None:
         hf_token = os.environ.get("HF_TOKEN")
-        print(f"Loading model: {MODEL_ID}")
-        # Prefer Flash Attention 2 at model-init time (LoRA-safe; avoids post-load
-        # set_attention_backend which modifies module structure after the fact).
-        # Falls back to default SDPA if FA2 is unavailable or unsupported.
-        try:
-            pipe = ZImagePipeline.from_pretrained(
-                MODEL_ID,
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-                token=hf_token if hf_token else None,
-                attn_implementation="flash_attention_2",
-            )
-            print("Model loaded with Flash Attention 2.")
-        except Exception as e:
-            print(f"Flash Attention 2 unavailable ({type(e).__name__}); loading with default attention.")
-            pipe = ZImagePipeline.from_pretrained(
-                MODEL_ID,
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-                token=hf_token if hf_token else None,
-            )
+        if os.path.isfile(CHECKPOINT_PATH):
+            print(f"Loading model from local checkpoint: {CHECKPOINT_PATH}")
+            try:
+                pipe = ZImagePipeline.from_single_file(
+                    CHECKPOINT_PATH,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                    config=MODEL_ID,
+                    token=hf_token if hf_token else None,
+                    attn_implementation="flash_attention_2",
+                )
+                print("Checkpoint loaded with Flash Attention 2.")
+            except Exception as e:
+                print(f"Flash Attention 2 unavailable ({type(e).__name__}); loading checkpoint with default attention.")
+                pipe = ZImagePipeline.from_single_file(
+                    CHECKPOINT_PATH,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                    config=MODEL_ID,
+                    token=hf_token if hf_token else None,
+                )
+        else:
+            print(f"Checkpoint not found at {CHECKPOINT_PATH}, falling back to HF model: {MODEL_ID}")
+            try:
+                pipe = ZImagePipeline.from_pretrained(
+                    MODEL_ID,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                    token=hf_token if hf_token else None,
+                    attn_implementation="flash_attention_2",
+                )
+                print("Model loaded with Flash Attention 2.")
+            except Exception as e:
+                print(f"Flash Attention 2 unavailable ({type(e).__name__}); loading with default attention.")
+                pipe = ZImagePipeline.from_pretrained(
+                    MODEL_ID,
+                    torch_dtype=torch.bfloat16,
+                    low_cpu_mem_usage=True,
+                    token=hf_token if hf_token else None,
+                )
 
         pipe.to("cuda")
 
