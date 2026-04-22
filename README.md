@@ -6,7 +6,7 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
-- **Photorealism-Oriented Defaults:** Uses official recommendations (40 steps, `shift=1.0`) and automatic step/guidance optimization based on the model variant (Base vs Turbo) to ensure stable, high-quality results.
+- **Photorealism-Oriented Defaults:** Uses official recommendations (40 steps, `cfg_normalization=true`, `shift=3.0`, `guidance_scale=4.5`) and automatic step/guidance optimization based on the model variant (Base vs Turbo) to ensure stable, high-quality results.
 - **Stable Mixed-Precision Inference:** Automatically handles `bfloat16` transformer weights and `float32` VAE decoding via `torch.autocast`. LoRA weights are explicitly cast to the model's native precision at load time to prevent "bias type mismatch" errors.
 - **High-Fidelity VAE:** Forces VAE decoding to `float32` to eliminate jagged artifacts and pixelation often seen in high-step `bfloat16` generations.
 - **Flash Attention 2:** Enabled at model load time via `attn_implementation="flash_attention_2"` when the `flash-attn` package is available (RTX 4090/5090 and newer). Falls back to PyTorch SDPA automatically.
@@ -60,13 +60,13 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `width` | Integer | No | `1024` | Image width in pixels. |
 | `height` | Integer | No | `1024` | Image height in pixels. |
 | `steps` | Integer | No | `auto` | Number of inference steps. Auto-optimizes to `40` (Base) or `9` (Turbo) when omitted. |
-| `guidance_scale` | Float | No | `auto` | CFG scale. Auto-optimizes to `4.0` (Base) or `0.0` (Turbo) when omitted. 3.0–5.0 recommended for Base photorealism. |
-| `cfg_normalization` | Boolean | No | `false` | CFG normalization. Recommended `false` for stable Z-Image results. |
+| `guidance_scale` | Float | No | `auto` | CFG scale. Auto-optimizes to `4.5` (Base) or `0.0` (Turbo) when omitted. 3.0–5.0 recommended for Base photorealism; 4.5 is the empirically tested sweet spot. |
+| `cfg_normalization` | Boolean | No | `true` | CFG normalization. `true` is the official Tongyi-MAI recommendation for photorealism; corrects guidance vector magnitude to preserve detail in complex scenes. Pass `false` for stylistic/artistic outputs. |
 | `cfg_truncation` | Float | No | `1.0` | CFG truncation. 1.0 recommended; lower to fix over-saturation. |
 | `max_sequence_length` | Integer | No | `512` | Token limit for long prompts. |
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |
 | `use_beta_sigmas` | Boolean | No | `false` | Enables FlowMatch beta-sigma scheduling. Recommended `false` for official Z-Image noise distribution. |
-| `shift` | Float | No | `1.0` | Scheduler shift. 1.0 is the official default for Z-Image architecture. Adjust if specifically required by a specialized LoRA. |
+| `shift` | Float | No | `3.0` | Scheduler shift. `3.0` concentrates early denoising steps on global composition, fixing the "underbaked" look on full-body and complex scenes that persists even at 50 steps with `shift=1.0`. Use `1.0` only if a specialized LoRA requires it. |
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling (`auto`: enabled only for outputs larger than 1024×1024). |
 
 ### Second Pass (Upscale + Refinement) Parameters
@@ -77,11 +77,11 @@ The second pass upscales the base output with RealPLKSR then runs img2img refine
 |-----------|------|----------|---------|-------------|
 | `second_pass_enabled` | Boolean | No | env default | Enables pass-2 upscale + img2img refinement. |
 | `second_pass_upscale` | Float | No | `1.25` | Upscale factor for pass 2. 1.25× fits within 24 GB with LoRAs loaded. Use 1.5× only on cards with more headroom. |
-| `second_pass_strength` | Float | No | `0.30` | Img2img denoising strength. Lower values (0.10–0.20) preserve more first-pass detail; higher values (0.30–0.45) add more refinement but may soften character features. |
-| `second_pass_steps` | Integer | No | `20` | Denoising steps for pass 2. |
-| `second_pass_guidance_scale` | Float | No | `4.0` | CFG scale for pass 2. |
+| `second_pass_strength` | Float | No | `0.42` | Img2img denoising strength. `0.42` is tuned to clean the Z-Image Base incomplete-denoising artifact (see upstream issue #144) without losing composition. Lower (0.20–0.30) to preserve more first-pass character detail; higher (0.50+) for heavy refinement. |
+| `second_pass_steps` | Integer | No | `28` | Denoising steps for pass 2. |
+| `second_pass_guidance_scale` | Float | No | `4.5` | CFG scale for pass 2. |
 | `second_pass_seed` | Integer | No | `seed` | Seed for pass 2 (defaults to same as base pass). |
-| `second_pass_cfg_normalization` | Boolean | No | `false` | CFG normalization for pass 2. |
+| `second_pass_cfg_normalization` | Boolean | No | `true` | CFG normalization for pass 2. Matches base pass default for consistent realism. |
 | `second_pass_cfg_truncation` | Float | No | `1.0` | CFG truncation for pass 2. |
 | `second_pass_max_sequence_length` | Integer | No | `512` | Token limit for pass-2 prompt. Synced with base pass for deep prompt understanding. |
 | `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Beta-sigma toggle for pass-2 scheduler. Defaults to the base pass value. |
@@ -95,7 +95,8 @@ Z-Image uses `FlowMatchEulerDiscreteScheduler` (flow matching). **DPM++, DDIM, E
 | FlowMatch Parameter | Effect |
 |---|---|
 | `float32 VAE` | **Enabled.** Automatically eliminates jagged/pixelated artifacts in generations. |
-| `shift=1.0` | Official default for photorealistic fidelity. |
+| `shift=3.0` | Concentrates early denoising on global composition; fixes full-body/complex scene quality. |
+| `cfg_normalization=true` | Official Tongyi-MAI recommendation for realism; corrects guidance magnitude across the scene. |
 | `steps=40` | Sweet spot for Base model detail. |
 
 ## LoRA URL Format
@@ -149,8 +150,6 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
     "width": 1024,
     "height": 1024,
     "steps": 40,
-    "guidance_scale": 4.5,
-    "shift": 1.0,
     "seed": 12345
   }
 }
@@ -169,9 +168,7 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
     "width": 1024,
     "height": 1024,
     "steps": 40,
-    "guidance_scale": 4.5,
-    "shift": 1.0,
-    "second_pass_strength": 0.15,
+    "second_pass_strength": 0.25,
     "seed": 12345
   }
 }
@@ -186,8 +183,6 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
     "width": 1024,
     "height": 1024,
     "steps": 40,
-    "guidance_scale": 4.0,
-    "shift": 1.0,
     "seed": 42
   }
 }

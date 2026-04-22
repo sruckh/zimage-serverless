@@ -744,7 +744,12 @@ def handler(job):
             "negative_prompt",
             "low quality, blurry, distorted, deformed, disfigured, bad anatomy, "
             "bad proportions, extra limbs, watermark, text, signature, jpeg artifacts, "
-            "cropped, out of frame, worst quality, normal quality",
+            "cropped, out of frame, worst quality, normal quality, "
+            "ugly face, bad face, mutated face, asymmetrical face, cross-eyed, bad eyes, "
+            "floating limbs, disconnected limbs, malformed hands, poorly drawn hands, "
+            "missing fingers, extra fingers, fused fingers, mutated hands, malformed feet, "
+            "waxy skin, plastic skin, airbrushed, overexposed, oversaturated, "
+            "grainy, noise, film grain, pixelated",
         )
         width = int(job_input.get("width", 1024))
         height = int(job_input.get("height", 1024))
@@ -760,23 +765,26 @@ def handler(job):
             
         if guidance_scale is None:
             # Turbo models MUST use low CFG (often 0.0) to prevent collapse
-            guidance_scale = 0.0 if is_turbo else 4.0
+            # 4.5 is the empirically tested sweet spot for Z-Image Base realism
+            guidance_scale = 0.0 if is_turbo else 4.5
         else:
             guidance_scale = float(guidance_scale)
 
         seed = int(job_input.get("seed", 42))
 
-        # Reverted to False for better stability (only enable if specifically requested)
-        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=False)
+        # True is the official recommendation for photorealism (per Tongyi-MAI/Z-Image README)
+        cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=True)
         cfg_truncation = float(job_input.get("cfg_truncation", 1.0))
         max_sequence_length = int(job_input.get("max_sequence_length", 512))
 
         use_beta_sigmas = _resolve_use_beta_sigmas(job_input.get("use_beta_sigmas"))
 
-        # Shift 1.0 is the official default for Z-Image / Lumina architecture.
+        # shift=3.0 concentrates more denoising steps on global composition first,
+        # which fixes the "underbaked" look on full-body and complex scenes at any step count.
+        # shift=1.0 (the architecture default) over-refines detail before structure is resolved.
         shift = job_input.get("shift")
         if shift is None:
-            shift = 1.0
+            shift = 3.0
         else:
             shift = float(shift)
 
@@ -784,11 +792,13 @@ def handler(job):
         second_pass_enabled_default = _to_bool(os.environ.get("SECOND_PASS_DEFAULT_ENABLED"), default=True)
         second_pass_enabled = _to_bool(job_input.get("second_pass_enabled"), default=second_pass_enabled_default)
         second_pass_upscale = float(job_input.get("second_pass_upscale", 1.25))
-        second_pass_strength = float(job_input.get("second_pass_strength", 0.30))
-        second_pass_steps = int(job_input.get("second_pass_steps", 20))
-        second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 4.0))
+        # 0.42 strength does enough work to clean the Z-Image Base "never fully denoised"
+        # artifact (confirmed in Tongyi-MAI/Z-Image issue #144) without losing composition.
+        second_pass_strength = float(job_input.get("second_pass_strength", 0.42))
+        second_pass_steps = int(job_input.get("second_pass_steps", 28))
+        second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 4.5))
         second_pass_seed = int(job_input.get("second_pass_seed", seed))
-        second_pass_cfg_normalization = _to_bool(job_input.get("second_pass_cfg_normalization"), default=False)
+        second_pass_cfg_normalization = _to_bool(job_input.get("second_pass_cfg_normalization"), default=True)
         second_pass_cfg_truncation = float(job_input.get("second_pass_cfg_truncation", 1.0))
         second_pass_max_sequence_length = int(job_input.get("second_pass_max_sequence_length", max_sequence_length))
         second_pass_use_beta_sigmas = _to_optional_bool(job_input.get("second_pass_use_beta_sigmas"))
