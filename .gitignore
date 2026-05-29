@@ -24,3 +24,9 @@ Thumbs.db
 *.jpeg
 *.safetensors
 /tmp/outputs/
+.antigravitycli
+.antigravitycli/
+.claude
+.claude/
+.codegraph/
+.mcp.json

@@ -13,10 +13,10 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 - **FlowMatch Scheduler:** Z-Image uses `FlowMatchEulerDiscreteScheduler` — a flow matching architecture. DPM++, DDIM, Euler Ancestral and other DDPM-era samplers are not compatible.
 - **Consistent Shift Across Passes:** The `shift` parameter is applied to both the base pass and the optional img2img refinement scheduler for consistent behavior.
 - **Adaptive VAE Tiling:** Keeps VAE tiling off at 1024-ish outputs by default to reduce potential tile artifacts, while enabling it for larger images.
-- **RealPLKSR Detail Upscale (default ON):** Runs the `4xPurePhoto-RealPLSKR` model as a pure feed-forward super-resolution pass on the final image — equivalent to the ComfyUI "Upscale Image (using Model)" node. Adds detail and realism with **no diffusion repaint**, so fine texture and skin detail are preserved. Controlled by `upscale_enabled` / `upscale_factor`. Upscaler runs on CUDA when `UPSCALE_USE_CUDA=true` (recommended for 24 GB cards).
-- **Optional img2img Hires-Fix (default OFF):** Set `second_pass_enabled=true` to additionally upscale and re-diffuse the image through Z-Image img2img. A second diffusion pass tends to smooth fine detail, so it is opt-in and intended for heavy stylistic refinement only.
+- **Selectable Detail Upscalers (spandrel):** Choose an upscaler from a curated registry via `upscale_model` (see [Available Upscalers](#available-upscalers)). Models are loaded with [spandrel](https://github.com/chaiNNer-org/spandrel), so the architecture (RealPLKSR, ESRGAN, etc.) is auto-detected from the checkpoint. Each model is downloaded **once, lazily, on first use** to the persistent volume and cached thereafter. The default is `nomos_webphoto` (`4xNomosWebPhoto_RealPLKSR`), a natural realistic-photo upscaler that restores detail rather than hallucinating fake facial micro-detail. The upscaler runs on **CPU by default** to keep VRAM free for the diffusion passes; set `UPSCALE_USE_CUDA=true` only if you have spare VRAM headroom.
+- **img2img Hires-Fix (default ON):** The final image is upscaled and then lightly **re-diffused** through Z-Image img2img (`second_pass_strength=0.42`). This repaints away GAN/SR artifacts (fake lashes/brows/hair) and the Z-Image Base under-denoising residual, producing more natural faces. Set `second_pass_enabled=false` to get the raw single-pass model upscale instead.
 - **Dynamic Multi-LoRA Support:** Load one or more LoRAs from any URL at runtime. Multiple LoRAs are downloaded in parallel and blended by weight. Handles all common LoRA key formats: kohya (`lora_down/lora_up`), diffusers-native (`lora_A/lora_B`), ComfyUI-exported (`diffusion_model.*` prefix), OneTrainer/Kohya exports (`lora_unet_` prefix, `context_refiner`, `noise_refiner`), and Flux2/Klein — with automatic alpha-key patching and format conversion (including `transformer_blocks.` to native `layers.` mapping).
-- **VRAM-Optimized:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set automatically to reduce allocator fragmentation. The default detail upscale is `1.5×`; the opt-in img2img hires-fix upscale defaults to `1.25×` to stay within 24 GB when LoRAs are loaded.
+- **VRAM-Optimized:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set automatically to reduce allocator fragmentation. The default img2img hires-fix upscale is `1.25×` to stay within 24 GB when LoRAs are loaded; the single-pass detail upscale (when the hires-fix is disabled) defaults to `1.5×`.
 - **S3 Integration:** Automatically uploads generated images to an S3-compatible bucket (configured for Backblaze B2).
 
 ## Environment Variables (RunPod Configuration)
@@ -32,14 +32,14 @@ Configure these variables in your RunPod Endpoint/Template:
 | `S3_BASE_URL` | Optional. Base URL for the returned link. Defaults to `endpoint/bucket` | - |
 | `MODEL_ID` | HuggingFace Repo ID or local path | `Tongyi-MAI/Z-Image` |
 | `HF_TOKEN` | Optional. Hugging Face token for private models. | - |
-| `UPSCALE_DEFAULT_ENABLED` | Optional. Enables the default RealPLKSR detail upscale pass. | `true` |
-| `SECOND_PASS_DEFAULT_ENABLED` | Optional. Enables the img2img hires-fix refinement by default. | `false` |
-| `UPSCALE_MODEL_URL` | Optional. URL for the upscaler `.pth` model. | Starinspace 4xPurePhoto-RealPLSKR |
-| `UPSCALE_MODEL_PATH` | Optional. Cached path for the upscaler model. | `/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth` |
-| `UPSCALE_USE_CUDA` | Optional. Runs the RealPLKSR upscaler on CUDA when `true`. Recommended for 24 GB cards; CPU default avoids OOM on smaller cards. | `false` |
+| `UPSCALE_DEFAULT_ENABLED` | Optional. Enables the single-pass detail upscale (used only when the hires-fix is disabled). | `true` |
+| `SECOND_PASS_DEFAULT_ENABLED` | Optional. Enables the img2img hires-fix refinement by default. | `true` |
+| `UPSCALE_DEFAULT_MODEL` | Optional. Registry key of the default upscaler (see [Available Upscalers](#available-upscalers)). | `nomos_webphoto` |
+| `UPSCALE_DIR` | Optional. Volume directory where upscaler checkpoints are cached. | `/runpod-volume/zimage-diffusion/models/upscale` |
+| `UPSCALE_USE_CUDA` | Optional. Runs the upscaler on CUDA when `true`. CPU default keeps VRAM free for the diffusion passes (with the hires-fix on by default, VRAM is the bottleneck on 24 GB). Enable only with spare headroom. | `false` |
 | `TORCH_COMPILE` | Optional. Compiles the transformer for faster inference after warm-up. First request will be slower. | `false` |
 
-The bootstrap script checks `UPSCALE_MODEL_PATH` on every start and downloads it once if missing.
+The bootstrap pre-stages the default upscaler (`UPSCALE_DEFAULT_MODEL`) to the volume on start. Any other registry model downloads lazily in the handler on first use and is then cached on the volume.
 
 ## Monitoring & Debugging
 
@@ -69,17 +69,18 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |
 | `use_beta_sigmas` | Boolean | No | `false` | Enables FlowMatch beta-sigma scheduling. Recommended `false` for official Z-Image noise distribution. |
 | `shift` | Float | No | `1.0` | Scheduler shift. `1.0` is the Z-Image architecture/scheduler default and matches official Tongyi-MAI inference settings. Higher values (e.g. `3.0`) over-weight early composition steps and starve detail refinement, producing softer/underbaked output — raise only if a specialized LoRA requires it. |
-| `upscale_enabled` | Boolean | No | `true` | Runs the RealPLKSR detail upscale on the final image (ComfyUI-style pure super-resolution, no repaint). Set `false` to return the raw generation. Skipped when `second_pass_enabled=true` (the hires-fix path does its own upscale). |
-| `upscale_factor` | Float | No | `1.5` | Net output scale for the RealPLKSR detail pass. The 4× model always runs (adding detail); the result is then resized to this factor. |
+| `upscale_model` | String | No | `nomos_webphoto` | Which upscaler from the registry to use. One of the [Available Upscalers](#available-upscalers) keys. Used by both the hires-fix upscale and the single-pass detail upscale. Unknown keys return an error. |
+| `upscale_enabled` | Boolean | No | `true` | Runs the single-pass detail upscale on the final image (ComfyUI-style pure super-resolution, no repaint). Set `false` to return the raw generation. Skipped when `second_pass_enabled=true` (the hires-fix path does its own upscale). |
+| `upscale_factor` | Float | No | `1.5` | Net output scale for the single-pass detail upscale. The model's native scale always runs (adding detail); the result is then resized to this factor. |
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling (`auto`: enabled only for outputs larger than 1024×1024). |
 
-### img2img Hires-Fix Parameters (opt-in)
+### img2img Hires-Fix Parameters (default ON)
 
-This is a separate, **opt-in** path from the default RealPLKSR detail upscale. When `second_pass_enabled=true`, the base output is upscaled with RealPLKSR and then **re-diffused** through Z-Image img2img for heavy stylistic refinement. Because a second diffusion pass tends to smooth fine detail/skin texture, it is **OFF by default** (`SECOND_PASS_DEFAULT_ENABLED=false`). When enabled, it replaces the default detail upscale.
+This is the **default** finishing path. The base output is upscaled with the selected `upscale_model` and then **re-diffused** through Z-Image img2img. The light second pass (`second_pass_strength=0.42`) repaints away upscaler GAN/SR artifacts (fake lashes/brows/hair) and the Z-Image Base under-denoising residual, producing more natural faces. It is **ON by default** (`SECOND_PASS_DEFAULT_ENABLED=true`); when enabled it replaces the single-pass detail upscale. Set `second_pass_enabled=false` to get the raw single-pass model upscale instead.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `second_pass_enabled` | Boolean | No | `false` | Enables the img2img hires-fix (upscale + re-diffusion). Overrides the default detail upscale when `true`. |
+| `second_pass_enabled` | Boolean | No | `true` | Enables the img2img hires-fix (upscale + re-diffusion). Replaces the single-pass detail upscale when `true`. Set `false` for the raw single-pass upscale. |
 | `second_pass_upscale` | Float | No | `1.25` | Upscale factor for pass 2. 1.25× fits within 24 GB with LoRAs loaded. Use 1.5× only on cards with more headroom. |
 | `second_pass_strength` | Float | No | `0.42` | Img2img denoising strength. `0.42` is tuned to clean the Z-Image Base incomplete-denoising artifact (see upstream issue #144) without losing composition. Lower (0.20–0.30) to preserve more first-pass character detail; higher (0.50+) for heavy refinement. |
 | `second_pass_steps` | Integer | No | `28` | Denoising steps for pass 2. |
@@ -91,6 +92,18 @@ This is a separate, **opt-in** path from the default RealPLKSR detail upscale. W
 | `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Beta-sigma toggle for pass-2 scheduler. Defaults to the base pass value. |
 | `second_pass_vae_tiling` | Boolean | No | `false` | VAE tiling for pass 2. Disabled by default — tiling causes visible seams at second-pass image sizes. Use slicing instead. |
 | `second_pass_vae_slicing` | Boolean | No | `true` | VAE slicing for pass 2. Enabled by default for VRAM headroom. |
+
+### Available Upscalers
+
+Pass one of these keys as `upscale_model`. All are loaded via spandrel (architecture auto-detected) and downloaded once to the volume on first use. Adding a model is config-only — extend the `UPSCALE_MODELS` registry in `handler.py` with a name, direct download URL, and filename.
+
+| Key | Model | Arch | Scale | Notes |
+|-----|-------|------|-------|-------|
+| `nomos_webphoto` | 4xNomosWebPhoto_RealPLKSR | RealPLKSR | 4× | **Default.** Natural realistic-photo upscaler (Philip Hofmann). Restores detail rather than hallucinating fake facial micro-detail — best general choice for people. |
+| `nomos_webphoto_esrgan` | 4xNomosWebPhoto_esrgan | ESRGAN | 4× | Same realistic dataset/target as the default, ESRGAN architecture. Slightly different detail character. |
+| `purephoto` | 4xPurePhoto-RealPLSKR | RealPLKSR | 4× | Legacy default. A sharpening/detail-injection model — crisper, but can over-process faces into a synthetic look. |
+
+> Source: [OpenModelDB](https://openmodeldb.info/). The native scale is read from the checkpoint; `upscale_factor` / `second_pass_upscale` set the final output scale (the model runs at its native scale, then the result is resized).
 
 ### Scheduler Notes
 
@@ -193,9 +206,24 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
 }
 ```
 
-> **Note on output size:** With the default RealPLKSR detail upscale (`upscale_enabled=true`, `upscale_factor=1.5`), a `1024×1024` request returns a **`1536×1536`** PNG. The generation runs at the requested `width`/`height`; the upscale is applied afterward.
+> **Note on output size:** With the default img2img hires-fix (`second_pass_enabled=true`, `second_pass_upscale=1.25`), a `1024×1024` request returns a **`1280×1280`** PNG. If you instead disable the hires-fix and use the single-pass detail upscale (`second_pass_enabled=false`, `upscale_factor=1.5`), a `1024×1024` request returns **`1536×1536`**. The generation runs at the requested `width`/`height`; the upscale is applied afterward.
 
-**Raw generation (detail upscale disabled):**
+**Choosing a different upscaler:**
+
+```json
+{
+  "input": {
+    "prompt": "A professional studio portrait, soft window light",
+    "width": 832,
+    "height": 1216,
+    "steps": 50,
+    "upscale_model": "nomos_webphoto_esrgan",
+    "seed": 42
+  }
+}
+```
+
+**Raw generation (no upscale, no hires-fix):**
 
 ```json
 {
@@ -204,6 +232,7 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
     "width": 1024,
     "height": 1024,
     "steps": 50,
+    "second_pass_enabled": false,
     "upscale_enabled": false,
     "seed": 42
   }
@@ -224,8 +253,10 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
    - Create a new Serverless Template using the image.
    - Attach a **Network Volume** to `/runpod-volume`.
    - Set the necessary Environment Variables (see above).
-   - Set `UPSCALE_USE_CUDA=true` if your worker has a 24 GB card.
+   - Leave `UPSCALE_USE_CUDA=false` (default) on 24 GB cards — the upscaler stays on CPU so VRAM is reserved for the diffusion passes.
    - Deploy the endpoint.
+
+> **VRAM / OOM note:** With the img2img hires-fix on by default, the second diffusion pass (at `second_pass_upscale=1.25×`) is the main VRAM consumer on 24 GB cards, especially with LoRAs loaded or larger `width`/`height`. If the second pass hits CUDA OOM, the handler **degrades gracefully**: it logs the OOM and returns the upscaled (non-re-diffused) image instead of failing the job. To avoid the second pass entirely, set `second_pass_enabled=false` per request or `SECOND_PASS_DEFAULT_ENABLED=false` on the endpoint.
 
 ## Project Structure
 

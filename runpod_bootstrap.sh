@@ -7,11 +7,10 @@ INSTALL_FLAG="$VOLUME_PATH/.installed_v3" # Bump version to re-trigger
 LOG_FILE="$VOLUME_PATH/bootstrap.log"
 
 export HF_HOME="${HF_HOME:-/runpod-volume/huggingface}"
-export UPSCALE_MODEL_URL="${UPSCALE_MODEL_URL:-https://github.com/starinspace/StarinspaceUpscale/releases/download/Models/4xPurePhoto-RealPLSKR.pth}"
-export UPSCALE_MODEL_PATH="${UPSCALE_MODEL_PATH:-/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth}"
+UPSCALE_DIR="${UPSCALE_DIR:-/runpod-volume/zimage-diffusion/models/upscale}"
 mkdir -p "$VOLUME_PATH"
 mkdir -p "$HF_HOME"
-mkdir -p "$(dirname "$UPSCALE_MODEL_PATH")"
+mkdir -p "$UPSCALE_DIR"
 
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -39,12 +38,15 @@ else
     echo "Environment already optimized."
 fi
 
-# Ensure the upscaler checkpoint exists on volume even when base install is already complete.
-if [ ! -f "$UPSCALE_MODEL_PATH" ]; then
-    echo "Caching upscaler model to volume: $UPSCALE_MODEL_PATH"
-    curl -L --fail --retry 3 --retry-delay 2 "$UPSCALE_MODEL_URL" -o "$UPSCALE_MODEL_PATH"
+# Pre-stage the default upscaler to the volume for a fast first request. Any other
+# model in the handler's registry (UPSCALE_MODELS) downloads lazily on first use.
+DEFAULT_UPSCALE_URL="https://github.com/Phhofm/models/releases/download/4xNomosWebPhoto_RealPLKSR/4xNomosWebPhoto_RealPLKSR.pth"
+DEFAULT_UPSCALE_PATH="$UPSCALE_DIR/4xNomosWebPhoto_RealPLKSR.pth"
+if [ ! -f "$DEFAULT_UPSCALE_PATH" ]; then
+    echo "Pre-staging default upscaler to volume: $DEFAULT_UPSCALE_PATH"
+    curl -L --fail --retry 3 --retry-delay 2 "$DEFAULT_UPSCALE_URL" -o "$DEFAULT_UPSCALE_PATH"
 else
-    echo "Upscaler model already cached: $UPSCALE_MODEL_PATH"
+    echo "Default upscaler already cached: $DEFAULT_UPSCALE_PATH"
 fi
 
 # Ensure the famegridZIB checkpoint exists on volume even when base install is already complete.

@@ -9,7 +9,6 @@ import os
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import gc
 import torch
-from torch import nn
 import requests
 import uuid
 import traceback
@@ -35,101 +34,48 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Global model cache to avoid re-loading across jobs in the same session
 pipe = None
 img2img_pipe = None
-upscaler = None
+# Loaded upscalers, keyed by registry name (e.g. {"nomos_webphoto": {...}}).
+upscalers = {}
 
-UPSCALE_MODEL_URL = os.environ.get(
-    "UPSCALE_MODEL_URL",
-    "https://github.com/starinspace/StarinspaceUpscale/releases/download/Models/4xPurePhoto-RealPLSKR.pth",
-)
-UPSCALE_MODEL_PATH = os.environ.get(
-    "UPSCALE_MODEL_PATH",
-    "/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth",
-)
 UPSCALE_USE_CUDA_ENV = os.environ.get("UPSCALE_USE_CUDA")
 
-class DCCM(nn.Sequential):
-    def __init__(self, dim: int):
-        super().__init__(
-            nn.Conv2d(dim, dim * 2, 3, 1, 1),
-            nn.Mish(),
-            nn.Conv2d(dim * 2, dim, 3, 1, 1),
-        )
+# Directory on the persistent RunPod network volume where upscaler checkpoints
+# are cached. Models download once (lazily, on first use) and survive cold starts.
+UPSCALE_DIR = os.environ.get(
+    "UPSCALE_DIR", "/runpod-volume/zimage-diffusion/models/upscale"
+)
 
-class PLKConv2d(nn.Module):
-    def __init__(self, dim: int, kernel_size: int):
-        super().__init__()
-        self.conv = nn.Conv2d(dim, dim, kernel_size, 1, kernel_size // 2)
-        self.idx = dim
+# Curated upscaler registry. Each entry is a static, vetted choice surfaced in the
+# front-end dropdown. All are loaded via spandrel (architecture auto-detected from
+# the checkpoint), so adding a new model is config-only — no architecture code.
+# All URLs are direct GitHub release downloads (reliable in serverless) and the
+# licenses permit redistribution/commercial use.
+UPSCALE_MODELS = {
+    # Default: the most natural-looking realistic-photo upscaler. Trained for real
+    # photographic detail under realistic degradations, so it restores rather than
+    # hallucinating fake facial micro-detail (lashes/brows/hair).
+    "nomos_webphoto": {
+        "url": "https://github.com/Phhofm/models/releases/download/4xNomosWebPhoto_RealPLKSR/4xNomosWebPhoto_RealPLKSR.pth",
+        "filename": "4xNomosWebPhoto_RealPLKSR.pth",
+        "label": "NomosWebPhoto (RealPLKSR, 4x) — natural realistic photo",
+    },
+    # Same dataset/training target as the default but ESRGAN architecture; slightly
+    # different detail character — a useful alternative to compare against.
+    "nomos_webphoto_esrgan": {
+        "url": "https://github.com/Phhofm/models/releases/download/4xNomosWebPhoto_esrgan/4xNomosWebPhoto_esrgan.pth",
+        "filename": "4xNomosWebPhoto_esrgan.pth",
+        "label": "NomosWebPhoto (ESRGAN, 4x) — realistic photo, alt arch",
+    },
+    # Legacy default. A sharpening/detail-injection model — crisper, but can over-
+    # process faces into a synthetic look. Kept for backward compatibility.
+    "purephoto": {
+        "url": "https://github.com/starinspace/StarinspaceUpscale/releases/download/Models/4xPurePhoto-RealPLSKR.pth",
+        "filename": "4xPurePhoto-RealPLSKR.pth",
+        "label": "PurePhoto (RealPLKSR, 4x) — sharp (legacy)",
+    },
+}
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.training:
-            x1, x2 = torch.split(x, [self.idx, x.size(1) - self.idx], dim=1)
-            x1 = self.conv(x1)
-            return torch.cat([x1, x2], dim=1)
-        x[:, : self.idx] = self.conv(x[:, : self.idx])
-        return x
-
-class EA(nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        self.f = nn.Sequential(nn.Conv2d(dim, dim, 3, 1, 1), nn.Sigmoid())
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * self.f(x)
-
-class PLKBlock(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        kernel_size: int,
-        split_ratio: float,
-        norm_groups: int,
-        use_ea: bool = True,
-    ):
-        super().__init__()
-        self.channel_mixer = DCCM(dim)
-        pdim = int(dim * split_ratio)
-        self.lk = PLKConv2d(pdim, kernel_size)
-        self.attn = EA(dim) if use_ea else nn.Identity()
-        self.refine = nn.Conv2d(dim, dim, 1, 1, 0)
-        self.norm = nn.GroupNorm(norm_groups, dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_skip = x
-        x = self.channel_mixer(x)
-        x = self.lk(x)
-        x = self.attn(x)
-        x = self.refine(x)
-        x = self.norm(x)
-        return x + x_skip
-
-class RealPLKSR(nn.Module):
-    def __init__(
-        self,
-        in_ch: int = 3,
-        out_ch: int = 3,
-        dim: int = 64,
-        n_blocks: int = 28,
-        upscaling_factor: int = 4,
-        kernel_size: int = 17,
-        split_ratio: float = 0.25,
-        use_ea: bool = True,
-        norm_groups: int = 4,
-        dropout: float = 0.0,
-    ):
-        super().__init__()
-        self.upscale = upscaling_factor
-        self.feats = nn.Sequential(
-            *[nn.Conv2d(in_ch, dim, 3, 1, 1)]
-            + [PLKBlock(dim, kernel_size, split_ratio, norm_groups, use_ea) for _ in range(n_blocks)]
-            + [nn.Dropout2d(dropout)]
-            + [nn.Conv2d(dim, out_ch * upscaling_factor**2, 3, 1, 1)]
-        )
-        self.to_img = nn.PixelShuffle(upscaling_factor)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.feats(x) + torch.repeat_interleave(x, repeats=self.upscale**2, dim=1)
-        return self.to_img(x)
+DEFAULT_UPSCALE_MODEL = os.environ.get("UPSCALE_DEFAULT_MODEL", "nomos_webphoto")
 
 def _to_bool(value, default=False):
     if value is None:
@@ -293,95 +239,60 @@ def get_img2img_pipeline():
         print("ZImageImg2ImgPipeline initialized from base pipeline components.")
     return img2img_pipe
 
-def get_upscaler():
-    global upscaler
-    if upscaler is None:
-        if not os.path.exists(UPSCALE_MODEL_PATH):
-            _download_file(UPSCALE_MODEL_URL, UPSCALE_MODEL_PATH)
-        loadnet = torch.load(UPSCALE_MODEL_PATH, map_location="cpu")
-        if isinstance(loadnet, dict):
-            if "params_ema" in loadnet and isinstance(loadnet["params_ema"], dict):
-                state_dict = loadnet["params_ema"]
-            elif "params" in loadnet and isinstance(loadnet["params"], dict):
-                state_dict = loadnet["params"]
-            elif "state_dict" in loadnet and isinstance(loadnet["state_dict"], dict):
-                state_dict = loadnet["state_dict"]
-            else:
-                nested_dicts = [v for v in loadnet.values() if isinstance(v, dict)]
-                matched = None
-                for candidate in nested_dicts:
-                    if "feats.0.weight" in candidate:
-                        matched = candidate
-                        break
-                state_dict = matched if matched is not None else loadnet
-        else:
-            state_dict = loadnet
+def get_upscaler(model_key):
+    """Lazily download (once, to the persistent volume) and load an upscaler by
+    registry key, caching the loaded model in-process keyed by name.
 
-        if not isinstance(state_dict, dict) or "feats.0.weight" not in state_dict:
-            raise RuntimeError(
-                "Upscaler checkpoint is not a supported RealPLKSR-style state dict."
-            )
-
-        # Remove common wrappers like `module.`
-        if any(k.startswith("module.") for k in state_dict.keys()):
-            state_dict = {k.replace("module.", "", 1): v for k, v in state_dict.items()}
-
-        dim = int(state_dict["feats.0.weight"].shape[0])
-        n_blocks = len([k for k in state_dict.keys() if k.startswith("feats.") and k.endswith(".channel_mixer.0.weight")])
-        kernel_size = int(state_dict["feats.1.lk.conv.weight"].shape[2])
-        split_ratio = float(state_dict["feats.1.lk.conv.weight"].shape[0]) / float(dim)
-        use_ea = "feats.1.attn.f.0.weight" in state_dict
-
-        feat_weight_indices = []
-        for key in state_dict.keys():
-            if key.startswith("feats.") and key.endswith(".weight"):
-                try:
-                    feat_weight_indices.append(int(key.split(".")[1]))
-                except Exception:
-                    pass
-        if not feat_weight_indices:
-            raise RuntimeError("Could not infer output conv index from upscaler checkpoint.")
-        last_feat_idx = max(feat_weight_indices)
-        out_channels = int(state_dict[f"feats.{last_feat_idx}.weight"].shape[0])
-        scale = int((out_channels // 3) ** 0.5)
-
-        model = RealPLKSR(
-            in_ch=3,
-            out_ch=3,
-            dim=dim,
-            n_blocks=n_blocks,
-            upscaling_factor=scale,
-            kernel_size=kernel_size,
-            split_ratio=split_ratio,
-            use_ea=use_ea,
-            norm_groups=4,
+    Architecture is auto-detected by spandrel, so any supported arch (RealPLKSR,
+    ESRGAN, DAT, ...) loads without bespoke code. The model's native scale is read
+    from the checkpoint rather than assumed.
+    """
+    if model_key not in UPSCALE_MODELS:
+        raise ValueError(
+            f"Unknown upscale_model '{model_key}'. Available: {sorted(UPSCALE_MODELS)}"
         )
-        try:
-            model.load_state_dict(state_dict, strict=True)
-        except RuntimeError as e:
-            raise RuntimeError(
-                f"Failed to load RealPLKSR upscaler checkpoint with strict key matching: {e}"
-            ) from e
+    if model_key in upscalers:
+        return upscalers[model_key]
 
-        use_cuda_for_upscaler = _to_bool(UPSCALE_USE_CUDA_ENV, default=False) and torch.cuda.is_available()
-        device = torch.device("cuda" if use_cuda_for_upscaler else "cpu")
-        model = model.to(device).eval()
-        if device.type == "cuda":
-            model = model.half()
-        upscaler = {
-            "model": model,
-            "scale": scale,
-            "device": device,
-            "half": device.type == "cuda",
-        }
-        print(f"RealPLKSR upscaler initialized (scale={scale}, device={device.type}).")
-    return upscaler
+    from spandrel import ImageModelDescriptor, ModelLoader
 
-def upscale_image(image, outscale):
+    entry = UPSCALE_MODELS[model_key]
+    model_path = os.path.join(UPSCALE_DIR, entry["filename"])
+    if not os.path.exists(model_path):
+        _download_file(entry["url"], model_path)
+
+    descriptor = ModelLoader().load_from_file(model_path)
+    if not isinstance(descriptor, ImageModelDescriptor):
+        raise RuntimeError(
+            f"Upscaler '{model_key}' is not a single-image upscaling model."
+        )
+
+    use_cuda_for_upscaler = (
+        _to_bool(UPSCALE_USE_CUDA_ENV, default=False) and torch.cuda.is_available()
+    )
+    device = torch.device("cuda" if use_cuda_for_upscaler else "cpu")
+    descriptor.to(device).eval()
+    use_half = device.type == "cuda" and descriptor.supports_half
+    if use_half:
+        descriptor.model.half()
+
+    upscalers[model_key] = {
+        "descriptor": descriptor,
+        "scale": int(descriptor.scale),
+        "device": device,
+        "half": use_half,
+    }
+    print(
+        f"Upscaler '{model_key}' loaded: arch={descriptor.architecture.name}, "
+        f"scale={descriptor.scale}, device={device.type}, half={use_half}."
+    )
+    return upscalers[model_key]
+
+def upscale_image(image, outscale, model_key):
     import numpy as np
 
-    upsampler = get_upscaler()
-    model = upsampler["model"]
+    upsampler = get_upscaler(model_key)
+    descriptor = upsampler["descriptor"]
     model_scale = float(upsampler["scale"])
     device = upsampler["device"]
     use_half = bool(upsampler["half"])
@@ -392,7 +303,7 @@ def upscale_image(image, outscale):
         tensor = tensor.half()
 
     with torch.inference_mode():
-        output = model(tensor).clamp(0, 1)
+        output = descriptor(tensor).clamp(0, 1)
     output = output.float().cpu().squeeze(0).permute(1, 2, 0).numpy()
 
     target_w = int(round(image.width * outscale))
@@ -800,17 +711,26 @@ def handler(job):
         else:
             shift = float(shift)
 
-        # RealPLKSR detail upscale (ComfyUI-style "Upscale Image (using Model)") — runs by
-        # default as a pure super-resolution pass that adds detail/realism, no diffusion repaint.
+        # Detail upscaler (ComfyUI-style "Upscale Image (using Model)"). The model is
+        # chosen from the curated registry (UPSCALE_MODELS) via `upscale_model`; it is
+        # downloaded to the persistent volume on first use and cached thereafter.
+        upscale_model = job_input.get("upscale_model") or DEFAULT_UPSCALE_MODEL
+        if upscale_model not in UPSCALE_MODELS:
+            return {
+                "error": f"Unknown upscale_model '{upscale_model}'. "
+                f"Available: {sorted(UPSCALE_MODELS)}"
+            }
         upscale_enabled = _to_bool(
             job_input.get("upscale_enabled"),
             default=_to_bool(os.environ.get("UPSCALE_DEFAULT_ENABLED"), default=True),
         )
         upscale_factor = float(job_input.get("upscale_factor", 1.5))
 
-        # Optional img2img refinement (hires-fix). Opt-in only: a second diffusion pass tends
-        # to smooth fine detail / skin texture, so it is OFF by default.
-        second_pass_enabled_default = _to_bool(os.environ.get("SECOND_PASS_DEFAULT_ENABLED"), default=False)
+        # img2img refinement (hires-fix) is ON by default: a light second diffusion pass
+        # over the upscaled image repaints away GAN/SR artifacts (fake lashes/brows/hair)
+        # and the Z-Image Base under-denoising residual, yielding more natural faces.
+        # Set "second_pass_enabled": false to get the raw single-pass upscale instead.
+        second_pass_enabled_default = _to_bool(os.environ.get("SECOND_PASS_DEFAULT_ENABLED"), default=True)
         second_pass_enabled = _to_bool(job_input.get("second_pass_enabled"), default=second_pass_enabled_default)
         second_pass_upscale = float(job_input.get("second_pass_upscale", 1.25))
         # 0.42 strength does enough work to clean the Z-Image Base "never fully denoised"
@@ -900,28 +820,37 @@ def handler(job):
             ).images[0]
 
         if second_pass_enabled and img2img_pipeline is not None:
-            # Opt-in hires-fix: RealPLKSR upscale followed by a light img2img refine pass.
-            upscaled_image = upscale_image(result, second_pass_upscale)
+            # Default hires-fix: model upscale followed by a light img2img refine pass.
+            upscaled_image = upscale_image(result, second_pass_upscale, upscale_model)
             _free_cuda_cache("before_second_pass_img2img")
             second_generator = torch.Generator("cuda").manual_seed(second_pass_seed)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                result = img2img_pipeline(
-                    prompt=prompt,
-                    image=upscaled_image,
-                    negative_prompt=negative_prompt if negative_prompt else None,
-                    strength=second_pass_strength,
-                    num_inference_steps=second_pass_steps,
-                    guidance_scale=second_pass_guidance_scale,
-                    cfg_normalization=second_pass_cfg_normalization,
-                    cfg_truncation=second_pass_cfg_truncation,
-                    max_sequence_length=second_pass_max_sequence_length,
-                    generator=second_generator,
-                ).images[0]
+            try:
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    result = img2img_pipeline(
+                        prompt=prompt,
+                        image=upscaled_image,
+                        negative_prompt=negative_prompt if negative_prompt else None,
+                        strength=second_pass_strength,
+                        num_inference_steps=second_pass_steps,
+                        guidance_scale=second_pass_guidance_scale,
+                        cfg_normalization=second_pass_cfg_normalization,
+                        cfg_truncation=second_pass_cfg_truncation,
+                        max_sequence_length=second_pass_max_sequence_length,
+                        generator=second_generator,
+                    ).images[0]
+            except torch.cuda.OutOfMemoryError:
+                # Graceful degradation: a 24 GB card can OOM on the second diffusion pass
+                # (larger sizes, LoRAs loaded, etc.). Rather than failing the job, fall back
+                # to the upscaled (but not re-diffused) image so the request still returns.
+                traceback.print_exc()
+                print("Second-pass img2img hit CUDA OOM — returning single-pass upscaled image instead.")
+                _free_cuda_cache("after_second_pass_oom")
+                result = upscaled_image
         elif upscale_enabled:
-            # Default path: pure RealPLKSR super-resolution on the final image (matches the
-            # ComfyUI "Upscale Image (using Model)" node) — adds detail/realism, no repaint.
+            # Fallback path (second pass disabled): pure model super-resolution on the
+            # final image (matches the ComfyUI "Upscale Image (using Model)" node) — no repaint.
             _free_cuda_cache("before_upscale")
-            result = upscale_image(result, upscale_factor)
+            result = upscale_image(result, upscale_factor, upscale_model)
 
         output_filename = f"{uuid.uuid4()}.png"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
