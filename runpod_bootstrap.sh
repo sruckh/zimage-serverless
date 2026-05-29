@@ -68,5 +68,14 @@ else
     echo "famegridZIB_v10 checkpoint already cached: $FAMEGRID_CHECKPOINT_PATH"
 fi
 
+# Ensure spandrel is installed (used by handler.py to load the upscaler models).
+# Runs on every start, outside the first-run install gate, so workers provisioned
+# before spandrel was added get it without requiring an image rebuild. Idempotent:
+# the import check short-circuits when it is already present.
+if ! python3 -c "import spandrel" 2>/dev/null; then
+    echo "Installing spandrel (upscaler loader)..."
+    pip install spandrel --break-system-packages
+fi
+
 echo "Starting RunPod Handler..."
 exec python3 handler.py
