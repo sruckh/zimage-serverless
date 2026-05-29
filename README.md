@@ -6,16 +6,17 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
-- **Photorealism-Oriented Defaults:** Uses official recommendations (40 steps, `cfg_normalization=true`, `shift=3.0`, `guidance_scale=4.5`) and automatic step/guidance optimization based on the model variant (Base vs Turbo) to ensure stable, high-quality results.
+- **Photorealism-Oriented Defaults:** Uses official Tongyi-MAI recommendations (50 steps, `cfg_normalization=true`, `shift=1.0`, `guidance_scale=4.5`) and automatic step/guidance optimization based on the model variant (Base vs Turbo) to ensure stable, high-quality results.
 - **Stable Mixed-Precision Inference:** Automatically handles `bfloat16` transformer weights and `float32` VAE decoding via `torch.autocast`. LoRA weights are explicitly cast to the model's native precision at load time to prevent "bias type mismatch" errors.
 - **High-Fidelity VAE:** Forces VAE decoding to `float32` to eliminate jagged artifacts and pixelation often seen in high-step `bfloat16` generations.
 - **Flash Attention 2:** Enabled at model load time via `attn_implementation="flash_attention_2"` when the `flash-attn` package is available (RTX 4090/5090 and newer). Falls back to PyTorch SDPA automatically.
 - **FlowMatch Scheduler:** Z-Image uses `FlowMatchEulerDiscreteScheduler` — a flow matching architecture. DPM++, DDIM, Euler Ancestral and other DDPM-era samplers are not compatible.
-- **Consistent Shift Across Passes:** The `shift` parameter is applied to both the base pass and the second-pass refinement scheduler for consistent behavior.
+- **Consistent Shift Across Passes:** The `shift` parameter is applied to both the base pass and the optional img2img refinement scheduler for consistent behavior.
 - **Adaptive VAE Tiling:** Keeps VAE tiling off at 1024-ish outputs by default to reduce potential tile artifacts, while enabling it for larger images.
-- **Optional Two-Pass Refinement:** Upscales pass-1 output with the `4xPurePhoto-RealPLSKR` checkpoint and runs a Z-Image img2img refinement pass for extra detail. Upscaler runs on CUDA when `UPSCALE_USE_CUDA=true` (recommended for 24 GB cards).
+- **RealPLKSR Detail Upscale (default ON):** Runs the `4xPurePhoto-RealPLSKR` model as a pure feed-forward super-resolution pass on the final image — equivalent to the ComfyUI "Upscale Image (using Model)" node. Adds detail and realism with **no diffusion repaint**, so fine texture and skin detail are preserved. Controlled by `upscale_enabled` / `upscale_factor`. Upscaler runs on CUDA when `UPSCALE_USE_CUDA=true` (recommended for 24 GB cards).
+- **Optional img2img Hires-Fix (default OFF):** Set `second_pass_enabled=true` to additionally upscale and re-diffuse the image through Z-Image img2img. A second diffusion pass tends to smooth fine detail, so it is opt-in and intended for heavy stylistic refinement only.
 - **Dynamic Multi-LoRA Support:** Load one or more LoRAs from any URL at runtime. Multiple LoRAs are downloaded in parallel and blended by weight. Handles all common LoRA key formats: kohya (`lora_down/lora_up`), diffusers-native (`lora_A/lora_B`), ComfyUI-exported (`diffusion_model.*` prefix), OneTrainer/Kohya exports (`lora_unet_` prefix, `context_refiner`, `noise_refiner`), and Flux2/Klein — with automatic alpha-key patching and format conversion (including `transformer_blocks.` to native `layers.` mapping).
-- **VRAM-Optimized:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set automatically to reduce allocator fragmentation. Second-pass upscale defaults to 1.25× to stay within 24 GB when LoRAs are loaded.
+- **VRAM-Optimized:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` is set automatically to reduce allocator fragmentation. The default detail upscale is `1.5×`; the opt-in img2img hires-fix upscale defaults to `1.25×` to stay within 24 GB when LoRAs are loaded.
 - **S3 Integration:** Automatically uploads generated images to an S3-compatible bucket (configured for Backblaze B2).
 
 ## Environment Variables (RunPod Configuration)
@@ -31,7 +32,8 @@ Configure these variables in your RunPod Endpoint/Template:
 | `S3_BASE_URL` | Optional. Base URL for the returned link. Defaults to `endpoint/bucket` | - |
 | `MODEL_ID` | HuggingFace Repo ID or local path | `Tongyi-MAI/Z-Image` |
 | `HF_TOKEN` | Optional. Hugging Face token for private models. | - |
-| `SECOND_PASS_DEFAULT_ENABLED` | Optional. Enables two-pass refinement by default. | `true` |
+| `UPSCALE_DEFAULT_ENABLED` | Optional. Enables the default RealPLKSR detail upscale pass. | `true` |
+| `SECOND_PASS_DEFAULT_ENABLED` | Optional. Enables the img2img hires-fix refinement by default. | `false` |
 | `UPSCALE_MODEL_URL` | Optional. URL for the upscaler `.pth` model. | Starinspace 4xPurePhoto-RealPLSKR |
 | `UPSCALE_MODEL_PATH` | Optional. Cached path for the upscaler model. | `/runpod-volume/zimage-diffusion/models/upscale/4xPurePhoto-RealPLSKR.pth` |
 | `UPSCALE_USE_CUDA` | Optional. Runs the RealPLKSR upscaler on CUDA when `true`. Recommended for 24 GB cards; CPU default avoids OOM on smaller cards. | `false` |
@@ -59,23 +61,25 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `negative_prompt` | String | No | *(see below)* | Text to avoid in the generation. A photorealism-oriented default is applied when omitted; pass `""` to disable. |
 | `width` | Integer | No | `1024` | Image width in pixels. |
 | `height` | Integer | No | `1024` | Image height in pixels. |
-| `steps` | Integer | No | `auto` | Number of inference steps. Auto-optimizes to `40` (Base) or `9` (Turbo) when omitted. |
+| `steps` | Integer | No | `auto` | Number of inference steps. Auto-optimizes to `50` (Base) or `9` (Turbo) when omitted. 28–50 recommended for Base. |
 | `guidance_scale` | Float | No | `auto` | CFG scale. Auto-optimizes to `4.5` (Base) or `0.0` (Turbo) when omitted. 3.0–5.0 recommended for Base photorealism; 4.5 is the empirically tested sweet spot. |
 | `cfg_normalization` | Boolean | No | `true` | CFG normalization. `true` is the official Tongyi-MAI recommendation for photorealism; corrects guidance vector magnitude to preserve detail in complex scenes. Pass `false` for stylistic/artistic outputs. |
 | `cfg_truncation` | Float | No | `1.0` | CFG truncation. 1.0 recommended; lower to fix over-saturation. |
 | `max_sequence_length` | Integer | No | `512` | Token limit for long prompts. |
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |
 | `use_beta_sigmas` | Boolean | No | `false` | Enables FlowMatch beta-sigma scheduling. Recommended `false` for official Z-Image noise distribution. |
-| `shift` | Float | No | `3.0` | Scheduler shift. `3.0` concentrates early denoising steps on global composition, fixing the "underbaked" look on full-body and complex scenes that persists even at 50 steps with `shift=1.0`. Use `1.0` only if a specialized LoRA requires it. |
+| `shift` | Float | No | `1.0` | Scheduler shift. `1.0` is the Z-Image architecture/scheduler default and matches official Tongyi-MAI inference settings. Higher values (e.g. `3.0`) over-weight early composition steps and starve detail refinement, producing softer/underbaked output — raise only if a specialized LoRA requires it. |
+| `upscale_enabled` | Boolean | No | `true` | Runs the RealPLKSR detail upscale on the final image (ComfyUI-style pure super-resolution, no repaint). Set `false` to return the raw generation. Skipped when `second_pass_enabled=true` (the hires-fix path does its own upscale). |
+| `upscale_factor` | Float | No | `1.5` | Net output scale for the RealPLKSR detail pass. The 4× model always runs (adding detail); the result is then resized to this factor. |
 | `vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling (`auto`: enabled only for outputs larger than 1024×1024). |
 
-### Second Pass (Upscale + Refinement) Parameters
+### img2img Hires-Fix Parameters (opt-in)
 
-The second pass upscales the base output with RealPLKSR then runs img2img refinement. Enabled by default via `SECOND_PASS_DEFAULT_ENABLED`.
+This is a separate, **opt-in** path from the default RealPLKSR detail upscale. When `second_pass_enabled=true`, the base output is upscaled with RealPLKSR and then **re-diffused** through Z-Image img2img for heavy stylistic refinement. Because a second diffusion pass tends to smooth fine detail/skin texture, it is **OFF by default** (`SECOND_PASS_DEFAULT_ENABLED=false`). When enabled, it replaces the default detail upscale.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `second_pass_enabled` | Boolean | No | env default | Enables pass-2 upscale + img2img refinement. |
+| `second_pass_enabled` | Boolean | No | `false` | Enables the img2img hires-fix (upscale + re-diffusion). Overrides the default detail upscale when `true`. |
 | `second_pass_upscale` | Float | No | `1.25` | Upscale factor for pass 2. 1.25× fits within 24 GB with LoRAs loaded. Use 1.5× only on cards with more headroom. |
 | `second_pass_strength` | Float | No | `0.42` | Img2img denoising strength. `0.42` is tuned to clean the Z-Image Base incomplete-denoising artifact (see upstream issue #144) without losing composition. Lower (0.20–0.30) to preserve more first-pass character detail; higher (0.50+) for heavy refinement. |
 | `second_pass_steps` | Integer | No | `28` | Denoising steps for pass 2. |
@@ -95,9 +99,9 @@ Z-Image uses `FlowMatchEulerDiscreteScheduler` (flow matching). **DPM++, DDIM, E
 | FlowMatch Parameter | Effect |
 |---|---|
 | `float32 VAE` | **Enabled.** Automatically eliminates jagged/pixelated artifacts in generations. |
-| `shift=3.0` | Concentrates early denoising on global composition; fixes full-body/complex scene quality. |
+| `shift=1.0` | Z-Image architecture/scheduler default; preserves detail refinement (raising it softens output). |
 | `cfg_normalization=true` | Official Tongyi-MAI recommendation for realism; corrects guidance magnitude across the scene. |
-| `steps=40` | Sweet spot for Base model detail. |
+| `steps=50` | Official Base-model sweet spot for detail (28–50 range). |
 
 ## LoRA URL Format
 
@@ -149,7 +153,7 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
     "lora_scale": 0.9,
     "width": 1024,
     "height": 1024,
-    "steps": 40,
+    "steps": 50,
     "seed": 12345
   }
 }
@@ -167,7 +171,8 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
     ],
     "width": 1024,
     "height": 1024,
-    "steps": 40,
+    "steps": 50,
+    "second_pass_enabled": true,
     "second_pass_strength": 0.25,
     "seed": 12345
   }
@@ -182,7 +187,24 @@ The `scale` values are **independent multipliers**, not percentages of a shared 
     "prompt": "A photorealistic landscape at golden hour",
     "width": 1024,
     "height": 1024,
-    "steps": 40,
+    "steps": 50,
+    "seed": 42
+  }
+}
+```
+
+> **Note on output size:** With the default RealPLKSR detail upscale (`upscale_enabled=true`, `upscale_factor=1.5`), a `1024×1024` request returns a **`1536×1536`** PNG. The generation runs at the requested `width`/`height`; the upscale is applied afterward.
+
+**Raw generation (detail upscale disabled):**
+
+```json
+{
+  "input": {
+    "prompt": "A photorealistic landscape at golden hour",
+    "width": 1024,
+    "height": 1024,
+    "steps": 50,
+    "upscale_enabled": false,
     "seed": 42
   }
 }

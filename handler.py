@@ -246,10 +246,22 @@ def get_pipeline():
             from safetensors.torch import load_file as safetensors_load_file
             state_dict = safetensors_load_file(CHECKPOINT_PATH)
             missing, unexpected = pipe.transformer.load_state_dict(state_dict, strict=False)
+            matched = len(state_dict) - len(unexpected)
             if missing:
                 print(f"Checkpoint missing keys (using base weights): {len(missing)}")
             if unexpected:
                 print(f"Checkpoint unexpected keys (ignored): {len(unexpected)}")
+            print(f"Checkpoint applied: {matched}/{len(state_dict)} tensors matched the transformer.")
+            if matched == 0:
+                print(
+                    "WARNING: ZERO checkpoint tensors matched the transformer — the finetune was "
+                    "NOT applied (likely a key-format mismatch). Output will be plain base Z-Image."
+                )
+            elif matched < len(state_dict) * 0.5:
+                print(
+                    f"WARNING: only {matched}/{len(state_dict)} checkpoint tensors matched — the "
+                    "finetune is only partially applied; verify the checkpoint key format."
+                )
             pipe.transformer.to(dtype=torch.bfloat16)
             print("Checkpoint weights loaded into transformer.")
         else:
@@ -759,7 +771,7 @@ def handler(job):
         # Official model-specific optimization
         is_turbo = "turbo" in MODEL_ID.lower()
         if steps is None:
-            steps = 9 if is_turbo else 40
+            steps = 9 if is_turbo else 50
         else:
             steps = int(steps)
             
@@ -779,17 +791,26 @@ def handler(job):
 
         use_beta_sigmas = _resolve_use_beta_sigmas(job_input.get("use_beta_sigmas"))
 
-        # shift=3.0 concentrates more denoising steps on global composition first,
-        # which fixes the "underbaked" look on full-body and complex scenes at any step count.
-        # shift=1.0 (the architecture default) over-refines detail before structure is resolved.
+        # shift=1.0 is the Z-Image architecture/scheduler default and matches the official
+        # Tongyi-MAI recommended inference settings. Higher shift (e.g. 3.0) over-weights
+        # early composition steps and starves detail refinement, producing softer/underbaked output.
         shift = job_input.get("shift")
         if shift is None:
-            shift = 3.0
+            shift = 1.0
         else:
             shift = float(shift)
 
-        # Optional second-pass refinement
-        second_pass_enabled_default = _to_bool(os.environ.get("SECOND_PASS_DEFAULT_ENABLED"), default=True)
+        # RealPLKSR detail upscale (ComfyUI-style "Upscale Image (using Model)") — runs by
+        # default as a pure super-resolution pass that adds detail/realism, no diffusion repaint.
+        upscale_enabled = _to_bool(
+            job_input.get("upscale_enabled"),
+            default=_to_bool(os.environ.get("UPSCALE_DEFAULT_ENABLED"), default=True),
+        )
+        upscale_factor = float(job_input.get("upscale_factor", 1.5))
+
+        # Optional img2img refinement (hires-fix). Opt-in only: a second diffusion pass tends
+        # to smooth fine detail / skin texture, so it is OFF by default.
+        second_pass_enabled_default = _to_bool(os.environ.get("SECOND_PASS_DEFAULT_ENABLED"), default=False)
         second_pass_enabled = _to_bool(job_input.get("second_pass_enabled"), default=second_pass_enabled_default)
         second_pass_upscale = float(job_input.get("second_pass_upscale", 1.25))
         # 0.42 strength does enough work to clean the Z-Image Base "never fully denoised"
@@ -879,6 +900,7 @@ def handler(job):
             ).images[0]
 
         if second_pass_enabled and img2img_pipeline is not None:
+            # Opt-in hires-fix: RealPLKSR upscale followed by a light img2img refine pass.
             upscaled_image = upscale_image(result, second_pass_upscale)
             _free_cuda_cache("before_second_pass_img2img")
             second_generator = torch.Generator("cuda").manual_seed(second_pass_seed)
@@ -895,6 +917,11 @@ def handler(job):
                     max_sequence_length=second_pass_max_sequence_length,
                     generator=second_generator,
                 ).images[0]
+        elif upscale_enabled:
+            # Default path: pure RealPLKSR super-resolution on the final image (matches the
+            # ComfyUI "Upscale Image (using Model)" node) — adds detail/realism, no repaint.
+            _free_cuda_cache("before_upscale")
+            result = upscale_image(result, upscale_factor)
 
         output_filename = f"{uuid.uuid4()}.png"
         output_path = os.path.join(OUTPUT_DIR, output_filename)
