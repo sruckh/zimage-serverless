@@ -27,7 +27,19 @@ COPY requirements.txt .
 # actually applied to the real install command until now.
 RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128 --break-system-packages
 
-# 2. Install remaining utilities from standard PyPI
+# 2a. Pre-install cryptography in isolation with --ignore-installed. The base
+# image ships cryptography 41.0.7 via apt/dpkg (no pip RECORD file), and
+# runpod's own dependency chain (-> paramiko -> cryptography>=48.0.1) makes
+# the main install below try to upgrade it, which fails with "error:
+# uninstall-no-record-file" since pip can't verify what to remove from a
+# non-pip-managed install. This is pip's own documented remedy
+# (https://github.com/pypa/pip/issues/12645). Scoped to its own command since
+# --ignore-installed is a whole-command flag, not a per-package one -- doing
+# it here keeps the main install below from ignoring already-satisfied
+# packages it shouldn't (numpy, sympy, jinja2, etc. already in the base image).
+RUN pip install --no-cache-dir --ignore-installed "cryptography>=48.0.1" --break-system-packages
+
+# 2b. Install remaining utilities from standard PyPI
 RUN pip install --no-cache-dir runpod boto3 requests pillow "diffusers==0.37.1" transformers accelerate safetensors peft scipy spandrel --break-system-packages
 
 # Copy scripts into the container

@@ -5,6 +5,37 @@ old → new value, a cited source, and why the source supports the change. It
 also records the live before/after RunPod endpoint test (best-effort,
 non-blocking).
 
+## Build failure after the torch pin: unrelated pre-existing bug, exposed by timing
+
+Pinning torch (see Flash Attention section below) triggered a full image
+rebuild, which then failed at a *different*, unrelated step: `pip install
+... runpod boto3 ... spandrel ...` failed with:
+```
+Attempting uninstall: cryptography
+  Found existing installation: cryptography 41.0.7
+error: uninstall-no-record-file
+× Cannot uninstall cryptography 41.0.7
+╰─> The package's contents are unknown: no RECORD file was found for cryptography.
+hint: The package was installed by debian.
+```
+Confirmed from the full build log that the torch install step itself
+succeeded (and was cache-hit on the retry) — this is a separate, pre-existing
+fragility: the base image ships `cryptography 41.0.7` via apt/dpkg (no pip
+RECORD file), and `runpod` (unpinned in the Dockerfile) had apparently picked
+up a newer release (1.10.0 in the failing log) whose dependency chain
+(`-> paramiko>=3.3.1 -> cryptography>=48.0.1`) makes pip try to upgrade a
+package it can't verify how to remove. This could have started failing on
+*any* rebuild once PyPI shipped that runpod/paramiko combination — coincidental
+timing with the torch-pin push, not caused by it.
+**Fixed**: pip's own documented remedy for this exact error
+(`https://github.com/pypa/pip/issues/12645`) is `--ignore-installed`. Added a
+separate, isolated `pip install --ignore-installed "cryptography>=48.0.1"`
+step before the main utilities install — scoped to just that one command,
+since `--ignore-installed` is a whole-command flag in pip (not a per-package
+option), so applying it directly in the main install line would have also
+made pip disregard "already satisfied" for every other already-present base-image
+package (numpy, sympy, jinja2, etc.), which isn't what's needed here.
+
 ## Flash Attention: two bugs, found and fixed sequentially
 
 1. **`handler.py` never actually enabled it** (fixed first). `attn_implementation="flash_attention_2"`
