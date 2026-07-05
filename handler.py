@@ -375,10 +375,19 @@ def _needs_manual_key_mapping(state_dict):
     return False
 
 
-def _convert_lora_to_diffusers(state_dict):
+def _convert_lora_to_diffusers(state_dict, network_alpha=None):
     """
     Convert various LoRA formats (Flux2/Klein, Kohya/OneTrainer, AmberNoir)
     to the transformer key layout expected by Diffusers Z-Image PEFT loading.
+
+    `network_alpha`, when known (read from the LoRA's own `ss_network_alpha`
+    safetensors metadata), is baked into the native-format passthrough weights
+    below as an `alpha/rank` scale -- `load_lora_into_transformer` hands the
+    state dict straight to PEFT's `load_lora_adapter`, which has no concept of
+    per-tensor `.alpha` keys (that's a Kohya/A1111-ecosystem convention, not a
+    PEFT one); diffusers' own official Z-Image LoRA converter bakes alpha into
+    the weight values for exactly this reason, and this function needs to do
+    the same for the case it's actually reached for.
     """
     import re as _re
     converted_state_dict = {}
@@ -407,23 +416,22 @@ def _convert_lora_to_diffusers(state_dict):
             # Already matches the likely attribute name
             pass
 
-    # 2b. Standardize internal block names: attention -> attn, feed_forward -> ffn
-    # ZImageTransformerBlock uses self.attn and self.ffn.
-    for k in list(original_state_dict.keys()):
-        new_key = k
-        if ".attention." in new_key:
-            new_key = new_key.replace(".attention.", ".attn.", 1)
-        if ".feed_forward." in new_key:
-            new_key = new_key.replace(".feed_forward.", ".ffn.", 1)
-
-        # Map sub-layer projections if needed (w1, w2, w3 -> fc1, fc2 etc might be needed if not standard)
-        if ".ffn.w1" in new_key:
-            new_key = new_key.replace(".ffn.w1", ".ffn.fc1", 1)
-        if ".ffn.w2" in new_key:
-            new_key = new_key.replace(".ffn.w2", ".ffn.fc2", 1)
-
-        if new_key != k:
-            original_state_dict[new_key] = original_state_dict.pop(k)
+    # 2b. NOTE: earlier code here renamed `.attention.` -> `.attn.` and
+    # `.feed_forward.` -> `.ffn.` (with `.ffn.w1`/`.ffn.w2` -> `.ffn.fc1`/`.ffn.fc2`),
+    # on the assumption that ZImageTransformerBlock exposes `self.attn`/`self.ffn`.
+    # Verified directly against the current diffusers source
+    # (src/diffusers/models/transformers/transformer_z_image.py,
+    # ZImageTransformerBlock.__init__ and FeedForward): the real submodules are
+    # `self.attention`, `self.feed_forward`, and the feed-forward's three gated
+    # linear layers are literally named `self.w1`/`self.w2`/`self.w3` (a SwiGLU
+    # FFN: w2(silu(w1(x)) * w3(x))) -- there is no `attn`/`ffn`/`fc1`/`fc2` at
+    # all. That rename was therefore corrupting every attention/feed_forward
+    # LoRA key for any LoRA already using Z-Image's native naming (as this
+    # function's own docstring format list implies for AmberNoir/Civitai-style
+    # inputs), and silently orphaning every `.feed_forward.w3.*` key since
+    # nothing mapped it to anything. Native `attention`/`feed_forward`/`w1`/`w2`/`w3`
+    # keys need no renaming at all -- they already match the model 1:1.
+    # https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/transformers/transformer_z_image.py
 
     # 3. Handle Kohya/OneTrainer style context_refiner/noise_refiner
     # lora_unet_context_refiner_X_attention_out -> context_refiner.X.attn.to_out.0
@@ -555,23 +563,66 @@ def _convert_lora_to_diffusers(state_dict):
             if original_key in original_state_dict:
                 converted_state_dict[f"{diff_key}.{lora_key}.weight"] = original_state_dict.pop(original_key)
 
-    # Move anything else that looks like a native transformer block key to converted
-    # (handles AmberNoir style that uses native-ish naming after prefix stripping)
+    # Move anything else that looks like a native transformer block key to converted:
+    # `transformer_blocks.`/`single_transformer_blocks.` (AmberNoir-style after prefix
+    # stripping), and `layers.`/`noise_refiner.`/`context_refiner.` -- Z-Image's own
+    # native LoRA key layout (see _load_lora / ZImageTransformerBlock), which needs no
+    # renaming at all, only to actually be moved into converted_state_dict. Without this,
+    # a LoRA already using the model's native naming has no other path in this function
+    # that ever moves its keys across, so the whole LoRA was silently dropped.
+    native_prefixes = (
+        "transformer_blocks.", "single_transformer_blocks.", "layers.", "noise_refiner.", "context_refiner.",
+    )
     for k in list(original_state_dict.keys()):
-        if k.startswith("transformer_blocks.") or k.startswith("single_transformer_blocks."):
-            converted_state_dict[k] = original_state_dict.pop(k)
+        if k.endswith(".alpha") or not k.startswith(native_prefixes):
+            continue
+        converted_state_dict[k] = original_state_dict.pop(k)
 
     # Ignore alpha and known metadata-ish keys that are not needed for PEFT injection.
     leftovers = [k for k in original_state_dict.keys() if ".alpha" not in k]
     if leftovers:
         print(f"Warning: Unconverted LoRA keys remain: {leftovers[:8]}")
 
+    # Bake alpha/rank scaling into every converted lora_B (up) weight, regardless of
+    # which branch above produced it. Done as a single pass over the FINAL
+    # converted_state_dict (rather than inline in each branch) so every lora_A/lora_B
+    # pair is guaranteed present by the time rank is looked up -- doing this inline,
+    # per-branch, while still popping from a shared in-progress dict risks looking up
+    # a sibling key that a different iteration already popped, silently skipping the
+    # scale. PEFT's `load_lora_adapter` has no concept of per-tensor `.alpha` keys
+    # (that's a Kohya/A1111-ecosystem convention), so without this every LoRA that
+    # reaches this manual-conversion path loads at whatever scale PEFT defaults to
+    # (effectively alpha == rank, i.e. 1.0) regardless of what the LoRA was actually
+    # trained at -- diffusers' own official Z-Image LoRA converter bakes alpha into
+    # weight values for exactly this reason.
+    if network_alpha is not None:
+        for k in list(converted_state_dict.keys()):
+            if not k.endswith(".lora_B.weight"):
+                continue
+            lora_a_key = f"{k[: -len('.lora_B.weight')]}.lora_A.weight"
+            lora_a_tensor = converted_state_dict.get(lora_a_key)
+            if lora_a_tensor is None:
+                continue
+            rank = lora_a_tensor.shape[0]
+            if rank:
+                converted_state_dict[k] = converted_state_dict[k] * (network_alpha / rank)
+
     converted_state_dict = {f"transformer.{k}": v for k, v in converted_state_dict.items()}
     return converted_state_dict
 
 
-def _patch_missing_lora_alphas(state_dict):
-    """Add missing alpha keys for LoRA entries that omit them."""
+def _patch_missing_lora_alphas(state_dict, network_alpha=None):
+    """Add missing alpha keys for LoRA entries that omit them.
+
+    Uses `network_alpha` -- the LoRA's own training-time alpha, read from the
+    safetensors file's `ss_network_alpha` metadata when present -- instead of
+    defaulting to rank. Defaulting to rank silently forces `alpha/rank == 1.0`
+    regardless of what the LoRA was actually trained at: e.g. a rank-32 LoRA
+    trained with `ss_network_alpha=16` has an intended 0.5 scale, and
+    defaulting to rank there doubles the LoRA's effective strength, which is a
+    well-known cause of overcooked/distorted output on the LoRA's subject
+    (faces especially, since identity is concentrated in a small region).
+    """
     import re as _re
     alpha_added = 0
     for key in list(state_dict.keys()):
@@ -581,10 +632,12 @@ def _patch_missing_lora_alphas(state_dict):
             alpha_key = f"{prefix}.alpha"
             if alpha_key not in state_dict:
                 rank = state_dict[key].shape[0]
-                state_dict[alpha_key] = torch.tensor(rank)
+                alpha_value = network_alpha if network_alpha is not None else rank
+                state_dict[alpha_key] = torch.tensor(alpha_value)
                 alpha_added += 1
     if alpha_added:
-        print(f"Added {alpha_added} missing LoRA alpha keys (default alpha=rank).")
+        source = f"network_alpha={network_alpha}" if network_alpha is not None else "default alpha=rank"
+        print(f"Added {alpha_added} missing LoRA alpha keys ({source}).")
 
 
 def _load_lora(pipeline, lora_path, adapter_name):
@@ -608,9 +661,25 @@ def _load_lora(pipeline, lora_path, adapter_name):
 
     # Attempt 2: normalize keys + patch missing alpha keys
     import tempfile
+    from safetensors import safe_open
     from safetensors.torch import load_file, save_file as _save_file
     import os as _os
     state_dict = load_file(lora_path)
+
+    # Read the LoRA's own training-time alpha from its safetensors metadata
+    # (e.g. `ss_network_alpha` from sd-scripts/musubi-tuner-style trainers), so
+    # a missing per-tensor alpha isn't assumed to equal rank -- see
+    # _patch_missing_lora_alphas for why that assumption is wrong.
+    network_alpha = None
+    with safe_open(lora_path, framework="pt") as _f:
+        lora_metadata = _f.metadata() or {}
+    for meta_key in ("ss_network_alpha", "network_alpha"):
+        if meta_key in lora_metadata:
+            try:
+                network_alpha = float(lora_metadata[meta_key])
+            except (TypeError, ValueError):
+                network_alpha = None
+            break
 
     needs_dot_norm = any("context.refiner." in k or "noise.refiner." in k for k in state_dict)
     if needs_dot_norm:
@@ -619,7 +688,7 @@ def _load_lora(pipeline, lora_path, adapter_name):
             for k, v in state_dict.items()
         }
 
-    _patch_missing_lora_alphas(state_dict)
+    _patch_missing_lora_alphas(state_dict, network_alpha=network_alpha)
 
     patched_path = None
     try:
@@ -641,7 +710,7 @@ def _load_lora(pipeline, lora_path, adapter_name):
     if not _needs_manual_key_mapping(state_dict):
         raise RuntimeError(f"LoRA '{adapter_name}' could not be loaded. Unknown format.")
     print("Converting keys for Z-Image transformer.")
-    state_dict = _convert_lora_to_diffusers(state_dict)
+    state_dict = _convert_lora_to_diffusers(state_dict, network_alpha=network_alpha)
 
     # Force state_dict to bfloat16 to match the base model's dtype and avoid precision mismatch errors.
     state_dict = {k: v.to(dtype=torch.bfloat16) for k, v in state_dict.items()}

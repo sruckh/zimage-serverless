@@ -148,6 +148,96 @@ non-blocking).
   Previously the code comment referenced "issue #144" without a URL; added
   for verifiability.
 
+### 4. LoRA loading: fixed silent key-drop and missing alpha scaling in the manual-conversion fallback
+
+- **Trigger**: user reported that with `TEST_LORA_URL` (`Gemneye/K1mScum-ZImage-Base`,
+  a character LoRA), the generated face was "warped and distorted... like putty" —
+  visually confirmed by cropping and zooming the face region of both the before
+  and after live-test images (both showed the same waxy/plastic skin and
+  slightly warped structure, unaffected by the `shift` fix above, which only
+  improved fabric/wall texture).
+- **Root cause, traced end to end and confirmed against real sources**:
+  1. This LoRA's actual key format (confirmed via a safetensors header range
+     request, no full download needed) is
+     `diffusion_model.layers.N.attention.{to_q,to_k,to_v,to_out.0}.lora_A/B.weight`
+     and `diffusion_model.layers.N.feed_forward.{w1,w2,w3}.lora_A/B.weight` —
+     420 tensors across 30 layers, **no per-tensor `.alpha` keys at all**;
+     alpha lives only in the file's `__metadata__`: `ss_network_alpha: '16.0'`,
+     `ss_network_dim: '32'` (i.e. an intended `alpha/rank = 0.5` scale).
+  2. Diffusers' own built-in Z-Image LoRA converter
+     (`_convert_non_diffusers_z_image_lora_to_diffusers` in
+     `diffusers/loaders/lora_conversion_utils.py`, fetched and traced directly)
+     is written for **underscore**-joined module paths
+     (`layers_0_attention_to_q...`) and ends with `if len(state_dict) > 0:
+     raise ValueError(f"state_dict\` should be empty at this point...")`.
+     Tracing this LoRA's **dot**-separated native keys through that function's
+     splitter shows they don't collapse back to a recognized suffix, so this
+     exact `ValueError` fires — and this codebase's own `_load_lora` Attempt-1
+     handler already special-cases the literal substring `"state_dict\` should
+     be empty"` as recoverable, confirming this exact path is what's hit in
+     production (not a hypothetical). This falls through Attempt 2 (same
+     underlying key shape, same failure) into Attempt 3, this file's own
+     manual `_convert_lora_to_diffusers`.
+  3. Attempt 3 had **two compounding bugs**, both confirmed against the actual
+     diffusers `ZImageTransformerBlock`/`FeedForward` source
+     (`transformer_z_image.py`, fetched directly):
+     - A key-rename step assumed the model exposes `self.attn`/`self.ffn` with
+       `fc1`/`fc2` feed-forward linears. The real model uses `self.attention`,
+       `self.feed_forward`, and a **3-matrix gated (SwiGLU) FFN literally named
+       `self.w1`/`self.w2`/`self.w3`** (`w2(silu(w1(x)) * w3(x))`) — there is
+       no `attn`/`ffn`/`fc1`/`fc2` anywhere. The rename was corrupting every
+       attention/feed-forward key for this LoRA, and had no mapping for `w3`
+       at all (only `w1`→`fc1`, `w2`→`fc2`), silently orphaning a third of
+       every layer's FFN LoRA weights even before the corruption is
+       considered. **Fixed**: removed the rename entirely — native
+       `attention`/`feed_forward`/`w1`/`w2`/`w3` keys need no renaming, they
+       already match the model 1:1.
+     - Separately and more severely: **no code path in this function ever
+       moved plain `layers.N.*` keys into the returned `converted_state_dict`
+       at all** — only `transformer_blocks.`/`single_transformer_blocks.`
+       prefixed keys were swept in. So this LoRA's weights weren't just
+       mis-mapped, they were **silently dropped in their entirety** — the
+       function returned an effectively-empty converted dict, meaning the
+       character LoRA was very likely contributing near-zero identity signal.
+       **Fixed**: added `layers.`, `noise_refiner.`, `context_refiner.` to the
+       set of prefixes swept into `converted_state_dict`.
+  4. Independently: nothing in `_convert_lora_to_diffusers` (any branch) ever
+     applied alpha/rank scaling to the converted weights — `.alpha` tensors
+     were explicitly excluded from the "unconverted leftovers" warning
+     (implying the author knew they'd never be used) and then just dropped.
+     PEFT's `load_lora_adapter` (the actual API `load_lora_into_transformer`
+     calls) has no built-in concept of per-tensor `.alpha` keys — that's a
+     Kohya/A1111-ecosystem convention, not a PEFT one; diffusers' own official
+     Z-Image converter bakes `alpha/rank` directly into the weight values for
+     exactly this reason. Without that, every LoRA reaching this manual
+     path loaded at an implicit `alpha == rank` (scale `1.0`) regardless of
+     what it was actually trained at — for this LoRA, double its intended
+     `0.5` scale, a well-documented cause of overcooked/distorted output
+     concentrated on the LoRA's own subject (faces especially, since identity
+     is packed into a small region). **Fixed**: `_load_lora` now reads
+     `ss_network_alpha` from the safetensors file's own metadata (via
+     `safetensors.safe_open(...).metadata()`) and threads it through both
+     `_patch_missing_lora_alphas` (benefits Attempt 2, for LoRAs using
+     diffusers' expected underscore format that happen to omit alpha tensors)
+     and `_convert_lora_to_diffusers` (benefits Attempt 3). A first version
+     of the Attempt-3 fix scaled `lora_B` inline while iterating and popping
+     from a shared dict — a code-review pass caught that this silently
+     skipped the scale whenever a LoRA's key order listed `lora_A` before
+     `lora_B` (the common case), since the sibling lookup would find its `A`
+     key already popped. Fixed by moving the scaling to a single pass **after**
+     all conversion branches finish, over the finalized `converted_state_dict`
+     (verified by a second review pass: every branch's A/B key-naming lines up
+     consistently, and scaling only `lora_B` by the full `alpha/rank` factor
+     is mathematically equivalent to scaling the whole `lora_B @ lora_A`
+     product, since scalar multiplication commutes through matrix
+     multiplication).
+  - Sources: safetensors header of
+    `https://huggingface.co/Gemneye/K1mScum-ZImage-Base/resolve/main/K1mScum-000086-Z-Image-Base.safetensors`
+    (fetched via HTTP range request, not a guess);
+    `https://raw.githubusercontent.com/huggingface/diffusers/main/src/diffusers/models/transformers/transformer_z_image.py`;
+    `https://raw.githubusercontent.com/huggingface/diffusers/main/src/diffusers/loaders/lora_conversion_utils.py`;
+    `https://raw.githubusercontent.com/huggingface/diffusers/main/src/diffusers/loaders/lora_pipeline.py`.
+
 ## Not changed, and why
 
 - `guidance_scale` (Base default `4.5`) and `steps` (Base default `50`) both
@@ -159,6 +249,17 @@ non-blocking).
   bf16 VAE banding/pixelation, but no Z-Image-specific citation was found
   confirming or refuting it for this model; left unchanged since there is no
   grounded reason to touch it.
+- **Flagged but not fixed**: `_convert_lora_to_diffusers`'s generic mapping
+  `"adaLN_modulation.0" -> "norm_out.linear"` (handler.py, step 5) looks
+  suspicious by the same pattern as the fixed `attn`/`ffn` bug — per the
+  actual `ZImageTransformerBlock` source, each block has its own
+  `self.adaLN_modulation` (a per-block modulation network), and there's a
+  separate `FinalLayer.adaLN_modulation` for the output layer only; neither
+  is obviously named `norm_out.linear` in the per-block case. Not changed
+  because no adaLN-format LoRA sample was available to verify the correct
+  mapping against (unlike the attention/feed_forward fix, which was verified
+  against this LoRA's own real keys) — changing it without a concrete case to
+  check would be trading one unverified guess for another.
 
 ## Code review
 
