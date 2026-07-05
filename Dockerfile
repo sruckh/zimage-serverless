@@ -16,8 +16,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # We use --break-system-packages because this is a dedicated container environment
 COPY requirements.txt .
 
-# 1. Install heavy AI frameworks first (from specific torch index)
-RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 --break-system-packages
+# 1. Install heavy AI frameworks first (from specific torch index).
+# Pinned to match the flash-attn wheel runpod_bootstrap.sh installs, which is
+# built specifically against the torch2.8 C++ ABI
+# (flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-*.whl). An unpinned install here
+# previously drifted to whatever the cu128 index's latest release was at
+# image-build time, breaking that wheel's ABI at import with "undefined
+# symbol" errors from libtorch's C10 CUDA layer. These versions already
+# matched what requirements.txt documented (see note there) but were never
+# actually applied to the real install command until now.
+RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128 --break-system-packages
 
 # 2. Install remaining utilities from standard PyPI
 RUN pip install --no-cache-dir runpod boto3 requests pillow "diffusers==0.37.1" transformers accelerate safetensors peft scipy spandrel --break-system-packages

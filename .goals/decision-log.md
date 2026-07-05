@@ -40,6 +40,34 @@ non-blocking).
      re-triggering on the next cold start.
    - Source: `https://github.com/Tongyi-MAI/Z-Image` (Quick Start section,
      `set_attention_backend` usage, fetched directly earlier this session).
+3. **Third bug, the actual remaining root cause**: after fix #2 deployed, a
+   fresh worker's bootstrap log showed the wheel installing "successfully"
+   per pip, but failing at import: `ImportError: .../flash_attn_2_cuda...so:
+   undefined symbol: _ZN3c104cuda29c10_cuda_check_implementationEiPKcS2_ib`.
+   This is a classic PyTorch C++ ABI mismatch — the hardcoded wheel URL
+   (`flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-*.whl`) is compiled against
+   the **torch2.8** ABI specifically (confirmed via
+   `https://api.github.com/repos/Dao-AILab/flash-attention/releases/tags/v2.8.3`
+   — only `cu12torch2.8` and other explicit per-minor-version tags exist, no
+   version-agnostic build), but `Dockerfile`'s torch install line
+   (`pip install torch torchvision torchaudio --index-url
+   .../cu128 ...`) had **no version pin at all** — meaning an image rebuild
+   at any point could silently pick up a newer torch minor release (e.g.
+   2.9.x) with a different C++ ABI, breaking the hardcoded wheel's compiled
+   symbols. Confirmed the intended, already-documented version matrix was
+   sitting unused in `requirements.txt` (`torch==2.8.0`, `torchvision==0.23.0`,
+   `torchaudio==2.8.0`) — per this repo's own established convention
+   (`requirements.txt` is documentation-only, never actually installed from;
+   see prior entries in this log) it was simply never applied to the real
+   Dockerfile install command. **Fixed** by pinning the Dockerfile's install
+   line to those exact versions, matching both `requirements.txt`'s
+   documented intent and the flash-attn wheel's actual ABI target.
+   - Also relevant to the original VRAM/OOM report: with Flash Attention
+     genuinely working (pending this fix), memory pressure from the second
+     hires-fix pass — now additionally carrying the LoRA's real (previously
+     silently-absent) memory footprint since the loading fix — should ease
+     somewhat, though this wasn't re-verified with a live test as of this
+     entry.
 
 ## Live endpoint test status
 
