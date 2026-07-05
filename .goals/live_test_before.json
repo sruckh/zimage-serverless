@@ -1,0 +1,14 @@
+{
+  "job_input": "see live_test.py FIXED_PROMPT, seed=42, TEST_LORA_URL loras scale 0.85",
+  "result": {
+    "delayTime": 13539,
+    "executionTime": 213002,
+    "id": "af6c878e-982c-4922-9e3b-dcb5a3f6243b-u2",
+    "output": {
+      "image_url": "https://s3.us-west-001.backblazeb2.com/zimage-serverless/33161482-17f9-4bed-9c73-cc7060185207.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=001f3b69a6004f90000000029%2F20260705%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260705T165858Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=4a559fb896ce2df463af548bcb8e287c1849b684e402fc16c58e9ce3b2729756"
+    },
+    "status": "COMPLETED",
+    "workerId": "ztuvaohcohmid1"
+  },
+  "image_build": 86
+}

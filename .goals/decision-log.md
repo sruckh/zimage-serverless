@@ -23,6 +23,54 @@ non-blocking).
   (HF/CivitAI tokens, RunPod internal API key, S3 credentials). Reported to
   the user directly; `.goals/check_endpoint.py` now redacts worker `env`
   from its output entirely.
+- **Operational observation (independent of this change)**: while the first
+  before-job attempt was queued, endpoint diagnostics showed 5 different
+  worker instances spin up and exit (`desiredStatus: EXITED`) within minutes
+  of each other, all still on the pre-change image (`4f5def1f6`). This looks
+  like it could be a startup crash-loop or cold-start instability unrelated
+  to the code change in this run — flagged here for visibility, not
+  something this goal's scope includes fixing.
+- **2026-07-05**: Resubmitted the before-job (identical fixed prompt,
+  `seed=42`, `TEST_LORA_URL`). Job `af6c878e-982c-4922-9e3b-dcb5a3f6243b-u2`
+  completed on image build **86** (pre-change, `4f5def1f6`) —
+  `delayTime=13.5s`, `executionTime=213s`. Output image downloaded and saved
+  to `.goals/live_test_before.json` (job record) and reviewed directly.
+  Result: a coherent, on-prompt street-fashion portrait — beige knit dress,
+  brown suede over-the-knee boots, structured handbag, concrete wall
+  background all present and correctly composed — but overall softness:
+  the knit's individual stitch definition (explicitly requested in the
+  prompt) is barely visible, and fine texture (suede nap, fabric weave)
+  reads as smooth/flat rather than crisp. Consistent with the reported "not
+  crisp" complaint and with `shift=1.0` being far off both checkpoints'
+  calibrated value.
+- After `git push` (commit `0d8d601`), RunPod's GitHub integration built a
+  new image automatically; within a few minutes one worker showed
+  `imageName` ending in `0d8d60194` (matching the new commit) — confirmed
+  via `.goals/check_endpoint.py`. Forced a rolling release with
+  `.goals/force_rolling_release.py` (`PATCH
+  https://rest.runpod.io/v1/endpoints/j7rrb3raom3lzh`, no-op body) — returned
+  `200`. Submitted the after-job with the identical job input immediately
+  after.
+- Job `a88e05b3-74f4-462d-8b59-e949e0f66abc-u1` completed on `workerId
+  3e65fpr72c5l53` — confirmed via `.goals/check_endpoint.py` to be running
+  image tag `0d8d60194` (the new commit), not the pre-change `4f5def1f6`.
+  Record saved to `.goals/live_test_after.json`.
+- **Visual comparison (before v86 `shift=1.0` vs. after v87 `shift=6.0`,
+  identical prompt/seed/LoRA)**: composition, pose, and framing are
+  consistent between both (same seed), as expected. The "after" image shows
+  a clear, direct improvement in exactly the areas the prompt stresses and
+  the user complained about: the knit sweater's ribbed stitch structure is
+  visibly more defined (individual ribs/columns are distinct, where the
+  "before" reads as a flatter, smoother knit), and the suede boots show more
+  texture/nap definition and visible creasing at the knee. The face also
+  reads slightly sharper. This is consistent with the grounded hypothesis:
+  the checkpoint-native `shift=6.0` redistributes inference steps toward
+  the detail-refinement portion of the schedule relative to the previous
+  hardcoded `shift=1.0`, producing crisper fine texture without changing
+  composition (same seed → same coarse structure). This is one sample at
+  one seed/prompt, not a statistical claim — but it directly corroborates
+  the citation-based reasoning above with an actual before/after result on
+  the live deployed endpoint.
 
 ## Quality-affecting parameter changes
 
