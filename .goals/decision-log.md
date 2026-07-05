@@ -36,7 +36,7 @@ option), so applying it directly in the main install line would have also
 made pip disregard "already satisfied" for every other already-present base-image
 package (numpy, sympy, jinja2, etc.), which isn't what's needed here.
 
-## Flash Attention: four bugs, found and fixed sequentially
+## Flash Attention: five bugs, found and fixed sequentially
 
 1. **`handler.py` never actually enabled it** (fixed first). `attn_implementation="flash_attention_2"`
    passed to `ZImagePipeline.from_pretrained(...)` is not a recognized kwarg —
@@ -155,6 +155,61 @@ package (numpy, sympy, jinja2, etc.), which isn't what's needed here.
      needed — same `flash-attn` install, no diffusers downgrade, so the
      LoRA fix stays intact. Not yet re-verified with a live test as of this
      entry (pending redeploy).
+
+5. **`flash_varlen` unusable: "missing package or the version is too old" —
+   even though flash-attn 2.8.3 had just installed successfully.** Redeployed
+   after fix #4 (commit `03665a3`). The build succeeded and a fresh worker
+   cold-started; this time bootstrap logged `Environment already
+   optimized.` (the `.installed_v5` flag from the *previous* worker's cold
+   start already existed on the shared persistent volume) and the pipeline
+   load then logged:
+   ```
+   RuntimeError: Flash Attention backend 'flash_varlen' is not usable because
+   of missing package or the version is too old. Please install
+   `flash-attn>=2.6.3`.
+   ```
+   This looked like a `flash` vs. `flash_varlen`-specific difference at
+   first, but reading `attention_dispatch.py`'s
+   `_validate_attention_backend_requirements` (same fetch as fix #4) shows
+   `FLASH` and `FLASH_VARLEN` share the *exact same* `_CAN_USE_FLASH_ATTN`
+   gate — so if one is "not usable" for missing-package reasons, both would
+   be. The real bug: `runpod_bootstrap.sh` installed the flash-attn wheel
+   (and the `diffusers==0.37.1` upgrade) via plain `pip install` inside the
+   `.installed_v5`-gated first-run block. That block's flag file lives on
+   `$VOLUME_PATH` — the *persistent, shared* network volume — but `pip
+   install` writes into the *container's own, ephemeral* site-packages.
+   The prior cold start (fix #4's redeploy) genuinely ran the full
+   first-run block on its container and touched the flag on the shared
+   volume. *This* cold start is a different container (new worker
+   instance) that inherited the already-set flag from the volume and so
+   skipped the install block entirely — leaving flash-attn genuinely absent
+   from *this* container's site-packages, even though a previous worker's
+   bootstrap log showed it installing fine. This bug would have recurred on
+   every subsequent new worker indefinitely; bumping `INSTALL_FLAG` again
+   only fixes the next single worker, not the underlying mismatch between
+   volume-scoped gating and container-scoped package state.
+   - Confirmed by inspecting the repo's own `Dockerfile`: `diffusers==0.37.1`
+     is *already* baked in at build time (the `2b.` utilities install line),
+     making bootstrap's runtime "upgrade" step fully redundant — but
+     flash-attn was never in the Dockerfile at all, only in the
+     volume-flag-gated runtime block. The existing `spandrel` install
+     lower in `runpod_bootstrap.sh` already documents and correctly avoids
+     this exact bug class (its comment: "Runs on every start, outside the
+     first-run install gate ... Idempotent: the import check short-circuits
+     when it is already present.") — prior art for the fix.
+   - **Fixed** by moving the flash-attn wheel install (with the same
+     source-build fallback and import-check as before, logic unchanged) into
+     `Dockerfile` as a new step `1b`, immediately after the pinned
+     `torch==2.8.0` install its ABI depends on — baked into the image at
+     build time, present in every container regardless of volume state.
+     Removed the now-fully-redundant `diffusers==0.37.1` runtime upgrade and
+     the flash-attn install block from `runpod_bootstrap.sh`'s first-run
+     gate entirely; that gate now only pre-caches the HF model snapshot,
+     which is genuinely volume-cacheable (the downloaded weights live under
+     `$HF_HOME` on the volume, unlike pip-installed packages). No
+     `INSTALL_FLAG` bump needed this time since nothing about the
+     model-caching gate's correctness changed. Not yet re-verified with a
+     live test as of this entry (pending redeploy).
 
 ## Live endpoint test status
 

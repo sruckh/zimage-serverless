@@ -19,28 +19,16 @@ echo "--- Bootstrap started at $(date) ---"
 if [ ! -f "$INSTALL_FLAG" ]; then
     echo "First start with new optimized image. Caching models..."
 
-    # Ensure diffusers >= 0.37.1 which includes Z-Image LoRA context_refiner fix (PR #13209).
-    # This runs at container startup to guarantee the right version regardless of Docker layer cache.
-    echo "Upgrading diffusers to ensure Z-Image LoRA fix is present..."
-    pip install --upgrade "diffusers==0.37.1" --break-system-packages
-
-    # Flash Attention - use specific wheel to avoid 30min compilation.
-    # NOTE: a previous version of this line chained `A || echo ... && B` without
-    # grouping, which bash parses as `(A || echo ...) && B` -- B (the slow source
-    # fallback) ran unconditionally, even when the wheel install (A) already
-    # succeeded, and could clobber a working install with a broken/failed
-    # source build. Use an explicit if/else so the fallback only runs on failure.
-    echo "Installing Flash Attention from pre-built wheel..."
-    FLASH_ATTN_URL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
-    if pip install "$FLASH_ATTN_URL" --break-system-packages; then
-        echo "Flash Attention wheel installed successfully."
-    else
-        echo "Flash Attention wheel failed, falling back to source (slow)..."
-        pip install flash-attn --break-system-packages
-    fi
-    python3 -c "import flash_attn; print(f'Flash Attention version: {flash_attn.__version__}')" \
-        || echo "WARNING: flash_attn is not importable after install -- Flash Attention will not be available."
-
+    # diffusers and Flash Attention are now baked into the image at build time
+    # (see Dockerfile) rather than installed here. A runtime install gated by
+    # this flag on the persistent network volume was unreliable for packages:
+    # pip installs land in the container's own ephemeral site-packages, but
+    # this flag lives on the shared, persistent volume -- so a new worker
+    # container cold-starting after an earlier worker already touched this
+    # flag would silently skip reinstalling them and run without Flash
+    # Attention. Model caching below is genuinely volume-cacheable (the
+    # downloaded weights themselves live under $HF_HOME on the volume), so it
+    # stays gated here.
     export MODEL_ID="${MODEL_ID:-Tongyi-MAI/Z-Image}"
     echo "Pre-caching model: $MODEL_ID..."
     python3 -c "from huggingface_hub import snapshot_download; snapshot_download('$MODEL_ID')"
