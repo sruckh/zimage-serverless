@@ -71,6 +71,23 @@ non-blocking).
   one seed/prompt, not a statistical claim — but it directly corroborates
   the citation-based reasoning above with an actual before/after result on
   the live deployed endpoint.
+- **2026-07-05, LoRA fix verification**: after the LoRA-loading fix (commit
+  `80b074e`, see "Quality-affecting parameter changes" #4 below), pushed,
+  waited for the new image (`80b074e6b`) to appear on two workers, forced
+  another rolling release, and resubmitted the identical fixed-prompt job.
+  Job `13253068-fcf6-4444-9efa-da305daa14e2-u2` completed on `workerId
+  ikaho6mpenuawv`, confirmed running image `80b074e6b`. Result, cropped and
+  zoomed on the face exactly as before/after v86/v87: a dramatic, unambiguous
+  improvement — real skin texture (visible pores, natural tonal variation)
+  in place of the flat waxy/plastic look present in *both* prior samples,
+  coherent anatomical structure with no warping, and a visibly distinct
+  identity consistent with the character LoRA actually contributing signal
+  now (rather than the generic, LoRA-not-really-applied face seen before the
+  fix). This directly corroborates the root-cause finding: the LoRA's
+  weights were being silently dropped/corrupted before, and are now loading
+  and applying correctly. User's original complaint ("the face... is warped
+  and distorted... looks like putty") addressed by this fix, independent of
+  the earlier `shift` fix (which only affected fabric/background texture).
 
 ## Quality-affecting parameter changes
 
