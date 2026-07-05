@@ -89,6 +89,93 @@ non-blocking).
   and distorted... looks like putty") addressed by this fix, independent of
   the earlier `shift` fix (which only affected fabric/background texture).
 
+  **Correction (same day, user pushback):** the above claim was overstated.
+  The test prompt used for this comparison (`.goals/live_test.py`'s fixed
+  texture-stress prompt) never included the LoRA's trigger word (`K1mScum`)
+  and never referenced the actual character's appearance — so "looks more
+  coherent/less waxy" was true, but is not evidence the LoRA's *identity*
+  was rendering correctly. It wasn't a valid identity test. See the next
+  section for the real investigation this prompted.
+
+### LoRA identity-match investigation (post-fix), prompted by user feedback
+
+After the fix above, the user tested with a proper identity prompt (trigger
+word included: `"K1mScum, A poised middle-aged woman with..."`) and reported
+the result "does not look like the character... not even a distant cousin
+... less than 50% matching," and raised the concern that the LoRA might
+still not be applying correctly. Investigated with controlled live tests
+against the deployed endpoint (same seed=42, same prompt, `second_pass_enabled=true`,
+width=864/height=1152), each confirmed via `workerId` → image tag to have
+run on the LoRA-fix build:
+
+1. **Reused the texture-test prompt's read as a positive signal was wrong.**
+   Re-examined: hair color/eye color matching between generations and the
+   reference is not proof the LoRA is contributing anything, since the
+   prompt text itself explicitly describes "chestnut-brown hair" / "warm
+   hazel eyes" — the base model renders that from the text alone, LoRA or
+   not. Only facial *structure/identity* (which text can't specify) is a
+   valid signal, and that's what the user correctly flagged as not matching.
+2. **`scale=1.2` vs. no-LoRA-at-all control, identical seed/prompt:** the two
+   results were visually indistinguishable. This confirmed the user's
+   concern directly — at that scale, the LoRA contributes ~nothing
+   distinguishable from the base model's own output.
+3. **Root cause: a second, independent scaling stage was already in the
+   code, uninvolved in the earlier bug.** `_activate_loras` (handler.py)
+   calls `pipeline.set_adapters(adapter_names, adapter_weights=[scale])`
+   after loading — diffusers' own standard LoRA-strength control, applied
+   *on top of* whatever's baked into the weights. So effective scale =
+   `(alpha/rank baked in) × (set_adapters weight)`. Before the earlier fix:
+   baked ≈1.0 (the bug) × 0.85 (request default) ≈ 0.85 effective — moot,
+   since those keys were being dropped entirely (0%). After the fix: baked
+   0.5 (this LoRA's actual trained ratio) × 0.85 ≈ 0.425 effective — and
+   the `scale=1.2` test only reached ≈0.6. This is architecturally correct
+   (matches how diffusers' own official Z-Image LoRA converter works: bake
+   training-time alpha once, `set_adapters` is the single further user
+   control, `1.0` = full designed strength) but means the nominal 0.85→1.2
+   bump moved the *effective* scale far less than expected.
+4. **`scale=2.5` (effective ≈1.25), same seed/prompt:** produced a real,
+   visible change from the no-LoRA control (hair styling shifted, expression
+   changed, a hint of nasolabial-fold/jaw definition appeared) — confirming
+   the LoRA mechanism is genuinely responsive to scale and not silently
+   inert — but still not a strong, unmistakable character match against the
+   user's reference images (one of which, `Krea2_turbo_00001_jjjhe...png`,
+   uses the *identical* prompt against a different base model trained on
+   identical data — the most direct ground truth available).
+5. **Checkpoint mismatch hypothesis, raised by the user.** `handler.py`'s
+   `get_pipeline()` loads stock `MODEL_ID` (`Tongyi-MAI/Z-Image`, confirmed
+   as this LoRA's own declared base model via its HF "Model tree" metadata —
+   ruling out a Base/Turbo mismatch) but then **unconditionally overwrites
+   the transformer's weights** with a third-party community finetune
+   (`famegridZIB_v10.safetensors`, downloaded automatically by
+   `runpod_bootstrap.sh` whenever `CIVITAI_TOKEN` is set — which it is on
+   this endpoint) *before* any LoRA is applied. Confirmed via CivitAI's API
+   (`https://civitai.com/api/v1/models/2533927`, since the page itself is
+   JS-gated and un-scrapable) that this is a **full 11.46 GB checkpoint**
+   (`"size": "full"`, bf16) — a complete parameter finetune, not a light
+   merge — whose own stated goal ("natural-looking skin with some texture,
+   not overly smoothed or plastic") is notably *not* what our outputs show
+   either (they read smooth/plastic), suggesting a real, unresolved
+   interaction rather than just a LoRA-strength tuning question. This
+   substitution is **not** in the README's documented environment variables
+   at all (a genuine gap — `CHECKPOINT_PATH`'s `os.environ.get(...)` call
+   spans multiple lines, which is why the earlier single-line-regex
+   README-cross-check in this log missed it entirely).
+6. **Fix**: added `USE_CIVITAI_CHECKPOINT` (default `true`, preserves
+   existing behavior) to both `handler.py` (`get_pipeline`, gates the
+   checkpoint injection) and `runpod_bootstrap.sh` (gates the download
+   itself, via a `case` statement matching the same falsy aliases as
+   `_to_bool` — a code-review pass caught the first version's plain
+   `[ "$VAR" = "false" ]` check as case-sensitive/narrower than `_to_bool`,
+   which would let the two scripts disagree on "0"/"False"/"no"/"off").
+   Documented `USE_CIVITAI_CHECKPOINT`, `CHECKPOINT_PATH`, and `CIVITAI_TOKEN`
+   in README.md's environment variables table (closing the gap noted above).
+   Lets the user test the LoRA against stock Base (set
+   `USE_CIVITAI_CHECKPOINT=false` on the endpoint) without a code change per
+   test, and is a reusable, permanent capability, not a one-off diagnostic
+   hack.
+   Sources: `https://huggingface.co/Gemneye/K1mScum-ZImage-Base` (Model tree:
+   base model `Tongyi-MAI/Z-Image`); `https://civitai.com/api/v1/models/2533927`.
+
 ## Quality-affecting parameter changes
 
 ### 1. `shift` default: `1.0` (both variants) → `6.0` (Base) / `3.0` (Turbo)

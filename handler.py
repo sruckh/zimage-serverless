@@ -194,7 +194,8 @@ def get_pipeline():
                 token=hf_token if hf_token else None,
             )
 
-        if os.path.isfile(CHECKPOINT_PATH):
+        use_civitai_checkpoint = _to_bool(os.environ.get("USE_CIVITAI_CHECKPOINT"), default=True)
+        if use_civitai_checkpoint and os.path.isfile(CHECKPOINT_PATH):
             print(f"Loading transformer weights from checkpoint: {CHECKPOINT_PATH}")
             from safetensors.torch import load_file as safetensors_load_file
             state_dict = safetensors_load_file(CHECKPOINT_PATH)
@@ -217,6 +218,8 @@ def get_pipeline():
                 )
             pipe.transformer.to(dtype=torch.bfloat16)
             print("Checkpoint weights loaded into transformer.")
+        elif not use_civitai_checkpoint:
+            print("USE_CIVITAI_CHECKPOINT=false — using stock base model weights.")
         else:
             print(f"No checkpoint found at {CHECKPOINT_PATH}, using base model weights.")
 

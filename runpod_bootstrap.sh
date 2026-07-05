@@ -50,23 +50,35 @@ else
 fi
 
 # Ensure the famegridZIB checkpoint exists on volume even when base install is already complete.
-FAMEGRID_CHECKPOINT_PATH="/runpod-volume/zimage-diffusion/models/checkpoints/famegridZIB_v10.safetensors"
-mkdir -p "$(dirname "$FAMEGRID_CHECKPOINT_PATH")"
-if [ ! -f "$FAMEGRID_CHECKPOINT_PATH" ]; then
-    if [ -n "$CIVITAI_TOKEN" ]; then
-        echo "Downloading famegridZIB_v10 checkpoint to volume: $FAMEGRID_CHECKPOINT_PATH"
-        wget "https://civitai.com/api/download/models/2847800?token=${CIVITAI_TOKEN}" \
-            -O "${FAMEGRID_CHECKPOINT_PATH}.tmp" \
-            --tries=3 \
-            --show-progress && \
-            mv "${FAMEGRID_CHECKPOINT_PATH}.tmp" "$FAMEGRID_CHECKPOINT_PATH" || \
-            echo "WARNING: famegridZIB_v10 download failed — check CIVITAI_TOKEN and connectivity."
-    else
-        echo "WARNING: CIVITAI_TOKEN not set, skipping famegridZIB_v10 checkpoint download."
-    fi
-else
-    echo "famegridZIB_v10 checkpoint already cached: $FAMEGRID_CHECKPOINT_PATH"
-fi
+# Set USE_CIVITAI_CHECKPOINT=false (also read by handler.py) to skip this entirely and run
+# stock Tongyi-MAI/Z-Image base weights instead -- e.g. to test LoRA compatibility, since a
+# LoRA trained against stock Base may bind more weakly against an already-finetuned checkpoint.
+# Matches the same falsy aliases as handler.py's _to_bool (case-insensitive
+# false/0/no/off), so the two can't disagree about whether the checkpoint is in use.
+case "${USE_CIVITAI_CHECKPOINT:-true}" in
+    [Ff][Aa][Ll][Ss][Ee]|0|[Nn][Oo]|[Oo][Ff][Ff])
+        echo "USE_CIVITAI_CHECKPOINT=false, skipping famegridZIB_v10 checkpoint download."
+        ;;
+    *)
+        FAMEGRID_CHECKPOINT_PATH="/runpod-volume/zimage-diffusion/models/checkpoints/famegridZIB_v10.safetensors"
+        mkdir -p "$(dirname "$FAMEGRID_CHECKPOINT_PATH")"
+        if [ ! -f "$FAMEGRID_CHECKPOINT_PATH" ]; then
+            if [ -n "$CIVITAI_TOKEN" ]; then
+                echo "Downloading famegridZIB_v10 checkpoint to volume: $FAMEGRID_CHECKPOINT_PATH"
+                wget "https://civitai.com/api/download/models/2847800?token=${CIVITAI_TOKEN}" \
+                    -O "${FAMEGRID_CHECKPOINT_PATH}.tmp" \
+                    --tries=3 \
+                    --show-progress && \
+                    mv "${FAMEGRID_CHECKPOINT_PATH}.tmp" "$FAMEGRID_CHECKPOINT_PATH" || \
+                    echo "WARNING: famegridZIB_v10 download failed — check CIVITAI_TOKEN and connectivity."
+            else
+                echo "WARNING: CIVITAI_TOKEN not set, skipping famegridZIB_v10 checkpoint download."
+            fi
+        else
+            echo "famegridZIB_v10 checkpoint already cached: $FAMEGRID_CHECKPOINT_PATH"
+        fi
+        ;;
+esac
 
 # Ensure spandrel is installed (used by handler.py to load the upscaler models).
 # Runs on every start, outside the first-run install gate, so workers provisioned

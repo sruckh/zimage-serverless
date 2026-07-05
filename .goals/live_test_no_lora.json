@@ -1,0 +1,19 @@
+{
+  "job_input": {
+    "prompt": "K1mScum, A poised middle-aged woman with medium-length chestnut-brown hair styled in soft loose waves just past her shoulders, warm hazel eyes, subtle laugh lines framing her mouth, natural matte skin texture, wearing a tailored charcoal blazer over a simple blouse, seated or standing facing the camera in a classic headshot pose with shoulders slightly angled, soft even studio lighting with a gentle catchlight in the eyes, plain neutral gray or muted blue backdrop, sharp focus on the face with a subtle falloff toward the background, close-up framing from the chest up, warm and approachable professional expression, clean corporate portrait style with natural color grading.",
+    "seed": 42,
+    "width": 864,
+    "height": 1152,
+    "second_pass_enabled": true
+  },
+  "result": {
+    "delayTime": 843,
+    "executionTime": 82802,
+    "id": "ac4846df-9e08-4934-98f7-d32e04c5a426-u1",
+    "output": {
+      "image_url": "https://s3.us-west-001.backblazeb2.com/zimage-serverless/5cfa50ac-6517-4663-8a99-f12f34acad50.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=001f3b69a6004f90000000029%2F20260705%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260705T191914Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=2f7d90d3310c4d5be85691e8174df70ea3e05f0136aab9938d3a34fbd5ad402c"
+    },
+    "status": "COMPLETED",
+    "workerId": "cw7i6d9opy64rb"
+  }
+}

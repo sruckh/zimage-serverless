@@ -32,6 +32,9 @@ Configure these variables in your RunPod Endpoint/Template:
 | `S3_BASE_URL` | Optional. Base URL for the returned link. Defaults to `endpoint/bucket` | - |
 | `MODEL_ID` | HuggingFace Repo ID or local path | `Tongyi-MAI/Z-Image` |
 | `HF_TOKEN` | Optional. Hugging Face token for private models. | - |
+| `USE_CIVITAI_CHECKPOINT` | Optional. When `true`, replaces the `MODEL_ID` transformer's weights at load time with the community finetune at `CHECKPOINT_PATH` (see below). Set `false` to run stock `MODEL_ID` weights unmodified — e.g. to test a LoRA trained against stock Base, since a LoRA's identity signal can bind more weakly against an already-finetuned checkpoint. | `true` |
+| `CHECKPOINT_PATH` | Optional. Path to the transformer checkpoint injected when `USE_CIVITAI_CHECKPOINT=true`. | `/runpod-volume/zimage-diffusion/models/checkpoints/famegridZIB_v10.safetensors` |
+| `CIVITAI_TOKEN` | Optional. CivitAI API token used by the bootstrap script to download the default checkpoint at `CHECKPOINT_PATH` when `USE_CIVITAI_CHECKPOINT` is not `false`. | - |
 | `UPSCALE_DEFAULT_ENABLED` | Optional. Enables the single-pass detail upscale (used only when the hires-fix is disabled). | `true` |
 | `SECOND_PASS_DEFAULT_ENABLED` | Optional. Enables the img2img hires-fix refinement by default. | `true` |
 | `UPSCALE_DEFAULT_MODEL` | Optional. Registry key of the default upscaler (see [Available Upscalers](#available-upscalers)). | `nomos_webphoto` |
