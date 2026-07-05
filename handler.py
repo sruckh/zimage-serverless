@@ -176,23 +176,25 @@ def get_pipeline():
     if pipe is None:
         hf_token = os.environ.get("HF_TOKEN")
         print(f"Loading base model: {MODEL_ID}")
+        pipe = ZImagePipeline.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            token=hf_token if hf_token else None,
+        )
+
+        # `attn_implementation` is not a recognized ZImagePipeline.from_pretrained
+        # kwarg -- diffusers silently drops unrecognized kwargs with a warning
+        # log rather than raising, so a previous version of this code that passed
+        # it there never actually enabled Flash Attention despite logging success.
+        # The real mechanism, per the official Tongyi-MAI/Z-Image README's Quick
+        # Start snippet, is calling set_attention_backend on the loaded transformer:
+        # https://github.com/Tongyi-MAI/Z-Image#-quick-start
         try:
-            pipe = ZImagePipeline.from_pretrained(
-                MODEL_ID,
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-                token=hf_token if hf_token else None,
-                attn_implementation="flash_attention_2",
-            )
-            print("Model loaded with Flash Attention 2.")
+            pipe.transformer.set_attention_backend("flash")
+            print("Flash Attention 2 backend enabled.")
         except Exception as e:
-            print(f"Flash Attention 2 unavailable ({type(e).__name__}); loading with default attention.")
-            pipe = ZImagePipeline.from_pretrained(
-                MODEL_ID,
-                torch_dtype=torch.bfloat16,
-                low_cpu_mem_usage=True,
-                token=hf_token if hf_token else None,
-            )
+            print(f"Flash Attention 2 unavailable ({type(e).__name__}: {e}); using default attention backend.")
 
         use_civitai_checkpoint = _to_bool(os.environ.get("USE_CIVITAI_CHECKPOINT"), default=True)
         if use_civitai_checkpoint and os.path.isfile(CHECKPOINT_PATH):
