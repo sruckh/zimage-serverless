@@ -5,6 +5,42 @@ old → new value, a cited source, and why the source supports the change. It
 also records the live before/after RunPod endpoint test (best-effort,
 non-blocking).
 
+## Flash Attention: two bugs, found and fixed sequentially
+
+1. **`handler.py` never actually enabled it** (fixed first). `attn_implementation="flash_attention_2"`
+   passed to `ZImagePipeline.from_pretrained(...)` is not a recognized kwarg —
+   diffusers silently drops it with a warning rather than raising, so the old
+   try/except always "succeeded" and printed "Model loaded with Flash
+   Attention 2" despite it never being enabled. Confirmed directly from a
+   production log line: `Keyword arguments {'attn_implementation':
+   'flash_attention_2'} are not expected by ZImagePipeline and will be
+   ignored.` immediately followed by the false-positive success message.
+   Fixed to call `pipe.transformer.set_attention_backend("flash")` after
+   loading, per the official Tongyi-MAI/Z-Image README's documented Quick
+   Start usage. Corrected the same claim in README.md.
+2. **`runpod_bootstrap.sh`'s install line itself was buggy**, uncovered
+   immediately after fix #1 made failures visible instead of silently
+   swallowed: a fresh worker logged `RuntimeError: Flash Attention backend
+   'flash' is not usable because of missing package or the version is too
+   old.` The install line was:
+   `pip install "$FLASH_ATTN_URL" ... || echo "..." && pip install flash-attn ...`
+   — bash parses `A || B && C` as `(A || B) && C`, so **C (the slow,
+   unpinned source-build fallback) runs unconditionally**, even when the
+   fast prebuilt-wheel install (A) already succeeded. Confirmed directly:
+   `bash -c 'true || echo b && echo c'` prints `c` even though `true`
+   succeeded. This redundant fallback build can fail or produce a broken
+   install that clobbers the wheel install that had just worked. Fixed with
+   an explicit `if/else` so the source fallback only runs when the wheel
+   install actually fails, and added a post-install `import flash_attn`
+   verification line (logs a clear warning if still not importable, instead
+   of finding out indirectly at inference time).
+   - This fix lives inside the bootstrap's first-run gate (`.installed_v3`),
+     which had already tripped on existing worker volumes — so the fix alone
+     wouldn't run for them. Bumped `INSTALL_FLAG` to `.installed_v4` to force
+     re-triggering on the next cold start.
+   - Source: `https://github.com/Tongyi-MAI/Z-Image` (Quick Start section,
+     `set_attention_backend` usage, fetched directly earlier this session).
+
 ## Live endpoint test status
 
 - **2026-07-04**: Submitted the "before" job (fixed test prompt, `seed=42`,

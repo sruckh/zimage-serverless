@@ -3,7 +3,7 @@ set -e
 
 # Configuration
 VOLUME_PATH="/runpod-volume/zimage-diffusion"
-INSTALL_FLAG="$VOLUME_PATH/.installed_v3" # Bump version to re-trigger
+INSTALL_FLAG="$VOLUME_PATH/.installed_v4" # Bump version to re-trigger
 LOG_FILE="$VOLUME_PATH/bootstrap.log"
 
 export HF_HOME="${HF_HOME:-/runpod-volume/huggingface}"
@@ -24,10 +24,22 @@ if [ ! -f "$INSTALL_FLAG" ]; then
     echo "Upgrading diffusers to ensure Z-Image LoRA fix is present..."
     pip install --upgrade "diffusers==0.37.1" --break-system-packages
 
-    # Flash Attention - use specific wheel to avoid 30min compilation
+    # Flash Attention - use specific wheel to avoid 30min compilation.
+    # NOTE: a previous version of this line chained `A || echo ... && B` without
+    # grouping, which bash parses as `(A || echo ...) && B` -- B (the slow source
+    # fallback) ran unconditionally, even when the wheel install (A) already
+    # succeeded, and could clobber a working install with a broken/failed
+    # source build. Use an explicit if/else so the fallback only runs on failure.
     echo "Installing Flash Attention from pre-built wheel..."
     FLASH_ATTN_URL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
-    pip install "$FLASH_ATTN_URL" --break-system-packages || echo "Flash Attention wheel failed, falling back to source (slow)..." && pip install flash-attn --break-system-packages
+    if pip install "$FLASH_ATTN_URL" --break-system-packages; then
+        echo "Flash Attention wheel installed successfully."
+    else
+        echo "Flash Attention wheel failed, falling back to source (slow)..."
+        pip install flash-attn --break-system-packages
+    fi
+    python3 -c "import flash_attn; print(f'Flash Attention version: {flash_attn.__version__}')" \
+        || echo "WARNING: flash_attn is not importable after install -- Flash Attention will not be available."
 
     export MODEL_ID="${MODEL_ID:-Tongyi-MAI/Z-Image}"
     echo "Pre-caching model: $MODEL_ID..."
