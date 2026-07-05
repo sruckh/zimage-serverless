@@ -176,6 +176,39 @@ run on the LoRA-fix build:
    Sources: `https://huggingface.co/Gemneye/K1mScum-ZImage-Base` (Model tree:
    base model `Tongyi-MAI/Z-Image`); `https://civitai.com/api/v1/models/2533927`.
 
+7. **Confirmed live, container build v94.** User set `USE_CIVITAI_CHECKPOINT=false`
+   on the endpoint and reran the identical trigger-word prompt (`scale=0.85`,
+   default — no scale boost this time). Logs confirm: `USE_CIVITAI_CHECKPOINT=false
+   — using stock base model weights.` (checkpoint injection correctly skipped) and
+   `Added 210 missing LoRA alpha keys (network_alpha=16.0)` (alpha fix reading the
+   correct metadata value). Result: a substantial, unambiguous improvement over
+   every prior test — visible natural forehead lines and skin texture (present in
+   the Krea2/photo references, absent from every famegridZIB-based test regardless
+   of LoRA scale), matching chestnut hair and hazel-amber eyes, and a plausibly
+   recognizable version of the same person. Not a perfect match (eye color reads
+   slightly warmer/browner than the reference's green-hazel, face slightly rounder
+   in the cheeks, and this particular generation didn't render the requested
+   blazer) — but this is the closest result of the entire investigation, at the
+   LoRA's default scale (0.85), with no scale boosting needed. **This confirms the
+   checkpoint-mismatch hypothesis**: the famegridZIB finetune was the dominant
+   factor suppressing this LoRA's identity signal, not the alpha-scaling bug or
+   LoRA strength — those fixes were real and necessary, but this was the change
+   that actually made the difference visible.
+   - Log gap worth noting for future debugging: ~71s elapsed between "Added 210
+     missing LoRA alpha keys" (20:10:36) and the first sampling step (20:11:47)
+     with no intervening log lines in what the user pasted — likely covers
+     Attempt 2's retry, Attempt 3's conversion (`_convert_lora_to_diffusers`),
+     and `load_lora_into_transformer`, but wasn't confirmed line-by-line since
+     the excerpt may have been trimmed. Worth getting the full log next time
+     this path is exercised, to confirm definitively whether Attempt 2 or
+     Attempt 3 is what's actually succeeding for this LoRA shape in practice.
+   - Default for `USE_CIVITAI_CHECKPOINT` was **not** changed (stays `true`) —
+     this result is strong evidence for LoRA compatibility specifically, but
+     changing the platform-wide default (famegridZIB was previously chosen
+     for its own stated photorealism/social-media aesthetic) is a broader
+     product decision than this investigation's scope; left for the user to
+     decide with this evidence in hand.
+
 ## Quality-affecting parameter changes
 
 ### 1. `shift` default: `1.0` (both variants) → `6.0` (Base) / `3.0` (Turbo)
