@@ -190,9 +190,26 @@ def get_pipeline():
         # The real mechanism, per the official Tongyi-MAI/Z-Image README's Quick
         # Start snippet, is calling set_attention_backend on the loaded transformer:
         # https://github.com/Tongyi-MAI/Z-Image#-quick-start
+        #
+        # The README's own "flash" backend breaks at inference time with
+        # ValueError("`attn_mask` is not supported for flash-attn 2.") -- Z-Image's
+        # transformer (diffusers transformer_z_image.py _prepare_sequence /
+        # _build_unified_sequence) unconditionally builds a boolean attn_mask for
+        # every attention call, even for a single-item batch, because tokens are
+        # always padded to SEQ_MULTI_OF=32. diffusers' "flash" backend hard-errors
+        # on any non-None mask; this is a confirmed upstream regression (variable-
+        # length caption masking added around diffusers 0.37 broke Z-Image/Qwen/
+        # Chroma) tracked at https://github.com/Tongyi-MAI/Z-Image/issues/117,
+        # whose maintainer-recommended fix is downgrading diffusers to 0.36.0 --
+        # not viable here since 0.37.1 is pinned for the Z-Image LoRA loading fix.
+        # "flash_varlen" is registered in diffusers' attention_dispatch.py against
+        # the same flash-attn package and explicitly packs a masked batch via
+        # cu_seqlens (_normalize_attn_mask supports the exact [batch,1,1,seq_len]
+        # mask shape ZSingleStreamAttnProcessor produces), so it works for Z-Image
+        # without a diffusers downgrade.
         try:
-            pipe.transformer.set_attention_backend("flash")
-            print("Flash Attention 2 backend enabled.")
+            pipe.transformer.set_attention_backend("flash_varlen")
+            print("Flash Attention 2 (varlen) backend enabled.")
         except Exception as e:
             print(f"Flash Attention 2 unavailable ({type(e).__name__}: {e}); using default attention backend.")
 

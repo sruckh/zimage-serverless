@@ -36,7 +36,7 @@ option), so applying it directly in the main install line would have also
 made pip disregard "already satisfied" for every other already-present base-image
 package (numpy, sympy, jinja2, etc.), which isn't what's needed here.
 
-## Flash Attention: two bugs, found and fixed sequentially
+## Flash Attention: four bugs, found and fixed sequentially
 
 1. **`handler.py` never actually enabled it** (fixed first). `attn_implementation="flash_attention_2"`
    passed to `ZImagePipeline.from_pretrained(...)` is not a recognized kwarg —
@@ -99,6 +99,62 @@ package (numpy, sympy, jinja2, etc.), which isn't what's needed here.
      silently-absent) memory footprint since the loading fix — should ease
      somewhat, though this wasn't re-verified with a live test as of this
      entry.
+
+4. **`attn_mask` is not supported for flash-attn 2 — Z-Image always builds a mask,
+   `"flash"` never accepts one.** After the `INSTALL_FLAG` bump (v4 → v5,
+   commit `300d326`) forced a real re-run of the fixed bootstrap on a fresh
+   worker, the build log confirmed Flash Attention 2 finally working end to
+   end: `Flash Attention wheel installed successfully.` → `Flash Attention
+   version: 2.8.3` → `Flash Attention 2 backend enabled.` But the very next
+   job then crashed during the actual `pipeline(...)` call with:
+   ```
+   ValueError: `attn_mask` is not supported for flash-attn 2.
+   ```
+   Root-caused by reading the pinned diffusers source directly (fetched via
+   firecrawl at the exact tag in use):
+   - `transformer_z_image.py` (`_prepare_sequence` / `_build_unified_sequence`,
+     https://raw.githubusercontent.com/huggingface/diffusers/v0.37.1/src/diffusers/models/transformers/transformer_z_image.py)
+     unconditionally builds `attn_mask = torch.zeros((bsz, max_seqlen),
+     dtype=torch.bool, ...)` for every attention call, even for a
+     single-item batch — because `_pad_with_ids` always pads tokens to
+     `SEQ_MULTI_OF=32` multiples. The mask is therefore **never `None`**,
+     regardless of whether any prompt truly needs padding.
+   - `attention_dispatch.py`'s `_flash_attention` (the `"flash"` backend,
+     https://raw.githubusercontent.com/huggingface/diffusers/v0.37.1/src/diffusers/models/attention_dispatch.py)
+     unconditionally raises `ValueError("`attn_mask` is not supported for
+     flash-attn 2.")` whenever `attn_mask is not None` — so `"flash"` can
+     never work for Z-Image, full stop, independent of LoRA/CFG/batch size.
+   - This is a confirmed, officially-tracked upstream regression, not a bug
+     in this repo's code: **https://github.com/Tongyi-MAI/Z-Image/issues/117**
+     (opened directly against the official Z-Image repo, title `attn_mask`
+     is not supported for flash-attn 2\`) traces it to
+     `huggingface/diffusers#12870` (merged), which added mandatory
+     attention-masking for variable-length captions (Qwen/Chroma/Z-Image)
+     around diffusers 0.37, breaking the plain `"flash"` backend for all of
+     them. The maintainers' own recommended workaround in that issue is
+     downgrading to `diffusers==0.36.0` — **not viable here**, since
+     `runpod_bootstrap.sh` deliberately upgrades to `diffusers==0.37.1`
+     specifically "to ensure Z-Image LoRA fix is present" (see fix #2
+     above); downgrading risks reintroducing that separate LoRA bug.
+   - `huggingface/diffusers#13479` (open) would eventually make `"flash"`
+     itself pack masked input through varlen internally, but is not in
+     0.37.1 yet.
+   - Verified via the same source fetch that diffusers already registers a
+     second backend, `AttentionBackendName.FLASH_VARLEN` ("flash_varlen"),
+     using the identical `flash-attn` package (same `_CAN_USE_FLASH_ATTN`
+     gate as `"flash"` in `_validate_attention_backend_requirements`) whose
+     `_flash_varlen_attention` implementation explicitly accepts
+     `attn_mask` and packs it into `cu_seqlens` via
+     `_prepare_for_flash_attn_or_sage_varlen`. Its `_normalize_attn_mask`
+     helper explicitly supports 1D–4D mask shapes, including the exact
+     `[batch, 1, 1, seq_len]` shape `ZSingleStreamAttnProcessor` produces
+     (`attention_mask[:, None, None, :]` in `transformer_z_image.py`).
+   - **Fixed** in `handler.py`'s `get_pipeline()` by switching
+     `pipe.transformer.set_attention_backend("flash")` →
+     `set_attention_backend("flash_varlen")`. No new package/version
+     needed — same `flash-attn` install, no diffusers downgrade, so the
+     LoRA fix stays intact. Not yet re-verified with a live test as of this
+     entry (pending redeploy).
 
 ## Live endpoint test status
 
