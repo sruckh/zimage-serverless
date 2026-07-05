@@ -1,0 +1,22 @@
+{
+  "job_input": {
+    "prompt": "A three-quarter street-style fashion portrait of woman in mid-stride along an urban sidewalk, her body angled slightly toward camera with a natural, confident walking cadence \u2014 weight shifting forward onto her leading foot, arms in easy motion at her sides. Her expression is composed and forward-focused, chin level, gaze directed just past the lens with the cool indifference of someone entirely at ease in her own presence.She wears a voluminous beige chunky-knit sweater dress that falls to mid-thigh \u2014 the open shoulder detail exposing one collarbone cleanly, the decorative lacing at the chest rendered with visible cord tension and eyelet hardware catching ambient light. The knit structure shows individual stitch definition, the fabric draping with realistic weight and slight swing from the motion of her stride, producing natural asymmetric folds along the hem. Her legs are fitted in tall, form-hugging brown suede over-the-knee boots with a structured block heel \u2014 the suede surface showing its characteristic fine nap texture, subtle compression wrinkles behind the knee from movement, and a matte finish that absorbs rather than reflects the ambient light. Her right hand grips the top handle of a large, rigid structured handbag in matching warm beige \u2014 clean corners, a minimal clasp hardware detail, smooth leather surface with a faint specular highlight along the top edge. Her left arm swings naturally forward in walking rhythm. The setting is a quiet urban street with an unbroken flat gray concrete wall running parallel behind her \u2014 its surface showing fine aggregate texture, faint weathering marks, and a long directional shadow cast obliquely across it from soft overhead daylight. The sidewalk beneath is smooth pale concrete, a subtle extension of the muted pastel palette. The entire environment stays restrained \u2014 no signage, no distracting props \u2014 allowing the subject and garment textures to own the frame completely. Lighting is soft diffused daylight from a high overcast sky, approximately 5500K, producing gentle directional shadows that fall with enough depth to sculpt the knit fabric folds and give the suede boots dimensional presence without blowing any highlights. A faint secondary bounce from the pale concrete wall provides a cool fill from the right, keeping shadow areas luminous rather than dead. Shot on a Sony A7R V with a 85mm f/1.8 lens, three-quarter framing from just below the boot heel to just above the crown \u2014 subject filling the vertical frame with breathing room on both sides. Subtle cinematic depth of field with the subject in full sharp focus, the concrete wall behind her transitioning to a very slight soft focus toward the frame edges. Individual knit fiber strands catching sidelight, suede nap microscopically rendered, natural hair movement from stride, fine skin texture on the exposed shoulder and collarbone. High-fashion street photography editorial style. Muted, sophisticated color palette anchored by warm beige and brown against cool concrete gray. Vibrant but restrained \u2014 no oversaturation. 8K resolution, high dynamic range, no watermarks, no text in frame, no motion blur on subject, clean wall background with no graffiti.",
+    "seed": 42,
+    "loras": [
+      {
+        "url": "https://huggingface.co/Gemneye/K1mScum-ZImage-Base/resolve/main/K1mScum-000086-Z-Image-Base.safetensors",
+        "scale": 0.85
+      }
+    ]
+  },
+  "result": {
+    "delayTime": 13296,
+    "executionTime": 209528,
+    "id": "13253068-fcf6-4444-9efa-da305daa14e2-u2",
+    "output": {
+      "image_url": "https://s3.us-west-001.backblazeb2.com/zimage-serverless/b18239be-b384-4ddc-b8c3-8ed5894574ca.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=001f3b69a6004f90000000029%2F20260705%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260705T181204Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=ed00c4397cb9a56e60040633151d4c2e31eda136af8776349a2b7253a6115263"
+    },
+    "status": "COMPLETED",
+    "workerId": "ikaho6mpenuawv"
+  }
+}
