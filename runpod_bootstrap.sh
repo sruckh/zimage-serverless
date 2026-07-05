@@ -3,7 +3,7 @@ set -e
 
 # Configuration
 VOLUME_PATH="/runpod-volume/zimage-diffusion"
-INSTALL_FLAG="$VOLUME_PATH/.installed_v4" # Bump version to re-trigger
+INSTALL_FLAG="$VOLUME_PATH/.installed_v5" # Bump version to re-trigger
 LOG_FILE="$VOLUME_PATH/bootstrap.log"
 
 export HF_HOME="${HF_HOME:-/runpod-volume/huggingface}"
