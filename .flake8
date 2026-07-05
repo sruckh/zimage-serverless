@@ -1,0 +1,13 @@
+[flake8]
+max-line-length = 120
+extend-exclude =
+    .venv-lint,.serena,.codegraph,__pycache__,zimage_inference.py,
+    # s3_utils.py is explicitly out of scope for the image-quality-improvement
+    # goal (see .goals/image-quality-improvement.md) — not modified here.
+    s3_utils.py
+extend-ignore =
+    # E203: whitespace before ':' — conflicts with black-style slicing, not used here but harmless to allow
+    E203,
+    # W503/W504: line break before/after binary operator — contradictory pair, pick neither
+    W503,
+    W504

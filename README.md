@@ -6,12 +6,12 @@ This project implements a RunPod serverless worker for the **Z-Image** base mode
 
 - **High-Performance Image:** Core dependencies are pre-baked into the Docker image for near-instant startup (<20s imports).
 - **Persistent Volume Support:** Model weights are cached on `/runpod-volume/huggingface` to avoid re-downloading.
-- **Photorealism-Oriented Defaults:** Uses official Tongyi-MAI recommendations (50 steps, `cfg_normalization=true`, `shift=1.0`, `guidance_scale=4.5`) and automatic step/guidance optimization based on the model variant (Base vs Turbo) to ensure stable, high-quality results.
+- **Photorealism-Oriented Defaults:** Uses official Tongyi-MAI recommendations (50 steps, `cfg_normalization=true`, `guidance_scale=4.5`) and automatic step/guidance optimization based on the model variant (Base vs Turbo) to ensure stable, high-quality results. The scheduler `shift` is left at each checkpoint's own shipped default (`6.0` for Base, `3.0` for Turbo — see [Scheduler Notes](#scheduler-notes)) unless explicitly overridden.
 - **Stable Mixed-Precision Inference:** Automatically handles `bfloat16` transformer weights and `float32` VAE decoding via `torch.autocast`. LoRA weights are explicitly cast to the model's native precision at load time to prevent "bias type mismatch" errors.
 - **High-Fidelity VAE:** Forces VAE decoding to `float32` to eliminate jagged artifacts and pixelation often seen in high-step `bfloat16` generations.
 - **Flash Attention 2:** Enabled at model load time via `attn_implementation="flash_attention_2"` when the `flash-attn` package is available (RTX 4090/5090 and newer). Falls back to PyTorch SDPA automatically.
 - **FlowMatch Scheduler:** Z-Image uses `FlowMatchEulerDiscreteScheduler` — a flow matching architecture. DPM++, DDIM, Euler Ancestral and other DDPM-era samplers are not compatible.
-- **Consistent Shift Across Passes:** The `shift` parameter is applied to both the base pass and the optional img2img refinement scheduler for consistent behavior.
+- **Consistent Shift Across Passes:** When `shift` is explicitly set in the request, the same value is applied to both the base pass and the optional img2img refinement scheduler. When omitted, both passes keep the loaded checkpoint's own native `shift` unchanged.
 - **Adaptive VAE Tiling:** Keeps VAE tiling off at 1024-ish outputs by default to reduce potential tile artifacts, while enabling it for larger images.
 - **Selectable Detail Upscalers (spandrel):** Choose an upscaler from a curated registry via `upscale_model` (see [Available Upscalers](#available-upscalers)). Models are loaded with [spandrel](https://github.com/chaiNNer-org/spandrel), so the architecture (RealPLKSR, ESRGAN, etc.) is auto-detected from the checkpoint. Each model is downloaded **once, lazily, on first use** to the persistent volume and cached thereafter. The default is `nomos_webphoto` (`4xNomosWebPhoto_RealPLKSR`), a natural realistic-photo upscaler that restores detail rather than hallucinating fake facial micro-detail. The upscaler runs on **CPU by default** to keep VRAM free for the diffusion passes; set `UPSCALE_USE_CUDA=true` only if you have spare VRAM headroom.
 - **img2img Hires-Fix (default ON):** The final image is upscaled and then lightly **re-diffused** through Z-Image img2img (`second_pass_strength=0.42`). This repaints away GAN/SR artifacts (fake lashes/brows/hair) and the Z-Image Base under-denoising residual, producing more natural faces. Set `second_pass_enabled=false` to get the raw single-pass model upscale instead.
@@ -59,6 +59,18 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `lora_url` | String | No | - | **Legacy.** URL to a single `.safetensors` LoRA file. Ignored when `loras` is provided. |
 | `lora_scale` | Float | No | `0.85` | **Legacy.** Scale for the single `lora_url` adapter. Ignored when `loras` is provided. |
 | `negative_prompt` | String | No | *(see below)* | Text to avoid in the generation. A photorealism-oriented default is applied when omitted; pass `""` to disable. |
+
+Default `negative_prompt` (applied when the field is omitted entirely — not when explicitly passed as an empty string):
+
+```
+low quality, blurry, distorted, deformed, disfigured, bad anatomy, bad proportions,
+extra limbs, watermark, text, signature, jpeg artifacts, cropped, out of frame,
+worst quality, normal quality, ugly face, bad face, mutated face, asymmetrical face,
+cross-eyed, bad eyes, floating limbs, disconnected limbs, malformed hands,
+poorly drawn hands, missing fingers, extra fingers, fused fingers, mutated hands,
+malformed feet, waxy skin, plastic skin, airbrushed, overexposed, oversaturated,
+grainy, noise, film grain, pixelated
+```
 | `width` | Integer | No | `1024` | Image width in pixels. |
 | `height` | Integer | No | `1024` | Image height in pixels. |
 | `steps` | Integer | No | `auto` | Number of inference steps. Auto-optimizes to `50` (Base) or `9` (Turbo) when omitted. 28–50 recommended for Base. |
@@ -68,7 +80,7 @@ When making a call to the `/run` or `/runsync` endpoint, use the following JSON 
 | `max_sequence_length` | Integer | No | `512` | Token limit for long prompts. |
 | `seed` | Integer | No | `42` | Random seed for reproducibility. |
 | `use_beta_sigmas` | Boolean | No | `false` | Enables FlowMatch beta-sigma scheduling. Recommended `false` for official Z-Image noise distribution. |
-| `shift` | Float | No | `1.0` | Scheduler shift. `1.0` is the Z-Image architecture/scheduler default and matches official Tongyi-MAI inference settings. Higher values (e.g. `3.0`) over-weight early composition steps and starve detail refinement, producing softer/underbaked output — raise only if a specialized LoRA requires it. |
+| `shift` | Float | No | *(checkpoint default)* | Scheduler shift. When omitted, the loaded checkpoint's own shipped scheduler config is used unchanged — `6.0` for `Tongyi-MAI/Z-Image` (Base), `3.0` for `Tongyi-MAI/Z-Image-Turbo`, per each model's `scheduler_config.json` on Hugging Face. Override only if a specialized LoRA or finetune is documented to need a different value. |
 | `upscale_model` | String | No | `nomos_webphoto` | Which upscaler from the registry to use. One of the [Available Upscalers](#available-upscalers) keys. Used by both the hires-fix upscale and the single-pass detail upscale. Unknown keys return an error. |
 | `upscale_enabled` | Boolean | No | `true` | Runs the single-pass detail upscale on the final image (ComfyUI-style pure super-resolution, no repaint). Set `false` to return the raw generation. Skipped when `second_pass_enabled=true` (the hires-fix path does its own upscale). |
 | `upscale_factor` | Float | No | `1.5` | Net output scale for the single-pass detail upscale. The model's native scale always runs (adding detail); the result is then resized to this factor. |
@@ -88,7 +100,7 @@ This is the **default** finishing path. The base output is upscaled with the sel
 | `second_pass_seed` | Integer | No | `seed` | Seed for pass 2 (defaults to same as base pass). |
 | `second_pass_cfg_normalization` | Boolean | No | `true` | CFG normalization for pass 2. Matches base pass default for consistent realism. |
 | `second_pass_cfg_truncation` | Float | No | `1.0` | CFG truncation for pass 2. |
-| `second_pass_max_sequence_length` | Integer | No | `512` | Token limit for pass-2 prompt. Synced with base pass for deep prompt understanding. |
+| `second_pass_max_sequence_length` | Integer | No | `max_sequence_length` | Token limit for pass-2 prompt. Defaults to the base pass's resolved value (`512` unless `max_sequence_length` was itself overridden). |
 | `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Beta-sigma toggle for pass-2 scheduler. Defaults to the base pass value. |
 | `second_pass_vae_tiling` | Boolean | No | `false` | VAE tiling for pass 2. Disabled by default — tiling causes visible seams at second-pass image sizes. Use slicing instead. |
 | `second_pass_vae_slicing` | Boolean | No | `true` | VAE slicing for pass 2. Enabled by default for VRAM headroom. |
@@ -112,7 +124,7 @@ Z-Image uses `FlowMatchEulerDiscreteScheduler` (flow matching). **DPM++, DDIM, E
 | FlowMatch Parameter | Effect |
 |---|---|
 | `float32 VAE` | **Enabled.** Automatically eliminates jagged/pixelated artifacts in generations. |
-| `shift=1.0` | Z-Image architecture/scheduler default; preserves detail refinement (raising it softens output). |
+| `shift` (checkpoint default) | Left at the loaded checkpoint's own shipped value (`6.0` Base / `3.0` Turbo) unless explicitly overridden — see the `shift` parameter above. |
 | `cfg_normalization=true` | Official Tongyi-MAI recommendation for realism; corrects guidance magnitude across the scene. |
 | `steps=50` | Official Base-model sweet spot for detail (28–50 range). |
 

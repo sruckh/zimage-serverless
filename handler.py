@@ -1,21 +1,21 @@
 import time
 t_start = time.time()
-import runpod
-import os
+import runpod  # noqa: E402
+import os  # noqa: E402
 
 # Reduce CUDA allocator fragmentation — must be set before PyTorch initializes CUDA.
 # Allows the allocator to grow/shrink segments instead of holding fixed-size blocks,
 # which prevents OOM when reserved-but-unallocated memory can't be recombined.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-import gc
-import torch
-import requests
-import uuid
-import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from PIL import Image
-from diffusers import ZImagePipeline, ZImageImg2ImgPipeline, FlowMatchEulerDiscreteScheduler
-from s3_utils import upload_image_to_s3
+import gc  # noqa: E402
+import torch  # noqa: E402
+import requests  # noqa: E402
+import uuid  # noqa: E402
+import traceback  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+from PIL import Image  # noqa: E402
+from diffusers import ZImagePipeline, ZImageImg2ImgPipeline, FlowMatchEulerDiscreteScheduler  # noqa: E402
+from s3_utils import upload_image_to_s3  # noqa: E402
 
 print(f"--- Initializing Handler (Imports took {time.time() - t_start:.2f}s) ---")
 
@@ -25,7 +25,7 @@ MODEL_DIR = "/runpod-volume/zimage-diffusion/models"
 CHECKPOINT_PATH = os.environ.get(
     "CHECKPOINT_PATH",
     "/runpod-volume/zimage-diffusion/models/checkpoints/famegridZIB_v10.safetensors",
-) # Runpod volume location
+)  # Runpod volume location
 OUTPUT_DIR = "/tmp/outputs"
 
 # Ensure output directory exists
@@ -55,7 +55,7 @@ UPSCALE_MODELS = {
     # photographic detail under realistic degradations, so it restores rather than
     # hallucinating fake facial micro-detail (lashes/brows/hair).
     "nomos_webphoto": {
-        "url": "https://github.com/Phhofm/models/releases/download/4xNomosWebPhoto_RealPLKSR/4xNomosWebPhoto_RealPLKSR.pth",
+        "url": "https://github.com/Phhofm/models/releases/download/4xNomosWebPhoto_RealPLKSR/4xNomosWebPhoto_RealPLKSR.pth",  # noqa: E501
         "filename": "4xNomosWebPhoto_RealPLKSR.pth",
         "label": "NomosWebPhoto (RealPLKSR, 4x) — natural realistic photo",
     },
@@ -77,6 +77,7 @@ UPSCALE_MODELS = {
 
 DEFAULT_UPSCALE_MODEL = os.environ.get("UPSCALE_DEFAULT_MODEL", "nomos_webphoto")
 
+
 def _to_bool(value, default=False):
     if value is None:
         return default
@@ -92,10 +93,12 @@ def _to_bool(value, default=False):
             return False
     return default
 
+
 def _to_optional_bool(value):
     if value is None:
         return None
     return _to_bool(value, default=False)
+
 
 def _configure_scheduler(pipeline, use_beta_sigmas, shift=None):
     """
@@ -123,6 +126,7 @@ def _configure_scheduler(pipeline, use_beta_sigmas, shift=None):
             f"shift={target_shift} (keeping model default): {repr(e)}"
         )
 
+
 def _resolve_use_beta_sigmas(job_input_value):
     """
     Resolve use_beta_sigmas with precedence:
@@ -139,6 +143,7 @@ def _resolve_use_beta_sigmas(job_input_value):
 
     return False
 
+
 def _free_cuda_cache(stage_label=None):
     if not torch.cuda.is_available():
         return
@@ -150,6 +155,7 @@ def _free_cuda_cache(stage_label=None):
         pass
     if stage_label:
         print(f"Cleared CUDA cache at stage: {stage_label}")
+
 
 def _download_file(url, destination_path):
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
@@ -163,6 +169,7 @@ def _download_file(url, destination_path):
                 f.write(chunk)
     os.replace(tmp_path, destination_path)
     print(f"Download complete: {destination_path}")
+
 
 def get_pipeline():
     global pipe
@@ -230,6 +237,7 @@ def get_pipeline():
         print("Model loaded successfully.")
     return pipe
 
+
 def get_img2img_pipeline():
     global img2img_pipe
     if img2img_pipe is None:
@@ -238,6 +246,7 @@ def get_img2img_pipeline():
         img2img_pipe.to("cuda")
         print("ZImageImg2ImgPipeline initialized from base pipeline components.")
     return img2img_pipe
+
 
 def get_upscaler(model_key):
     """Lazily download (once, to the persistent volume) and load an upscaler by
@@ -288,6 +297,7 @@ def get_upscaler(model_key):
     )
     return upscalers[model_key]
 
+
 def upscale_image(image, outscale, model_key):
     import numpy as np
 
@@ -316,6 +326,7 @@ def upscale_image(image, outscale, model_key):
         out_img = out_img.resize((target_w, target_h), resample=Image.Resampling.LANCZOS)
     return out_img
 
+
 def download_lora(url):
     """
     Downloads LoRA to ephemeral storage (/tmp).
@@ -329,12 +340,14 @@ def download_lora(url):
             f.write(chunk)
     return local_path
 
+
 def _normalize_lora_key_prefix(key):
     normalized = key
     for prefix in ("base_model.model.", "diffusion_model.", "transformer.", "lora_unet_"):
         if normalized.startswith(prefix):
             normalized = normalized[len(prefix):]
     return normalized
+
 
 def _needs_manual_key_mapping(state_dict):
     """
@@ -360,6 +373,7 @@ def _needs_manual_key_mapping(state_dict):
         if any(marker in normalized for marker in markers):
             return True
     return False
+
 
 def _convert_lora_to_diffusers(state_dict):
     """
@@ -401,7 +415,7 @@ def _convert_lora_to_diffusers(state_dict):
             new_key = new_key.replace(".attention.", ".attn.", 1)
         if ".feed_forward." in new_key:
             new_key = new_key.replace(".feed_forward.", ".ffn.", 1)
-        
+
         # Map sub-layer projections if needed (w1, w2, w3 -> fc1, fc2 etc might be needed if not standard)
         if ".ffn.w1" in new_key:
             new_key = new_key.replace(".ffn.w1", ".ffn.fc1", 1)
@@ -527,7 +541,7 @@ def _convert_lora_to_diffusers(state_dict):
         "double_stream_modulation_img.lin": "double_stream_modulation_img.linear",
         "double_stream_modulation_txt.lin": "double_stream_modulation_txt.linear",
     }
-    
+
     # Generic adaLN mapping for transformer blocks
     # transformer_blocks.X.adaLN_modulation.0 -> transformer_blocks.X.norm_out.linear
     for k in list(original_state_dict.keys()):
@@ -554,6 +568,7 @@ def _convert_lora_to_diffusers(state_dict):
 
     converted_state_dict = {f"transformer.{k}": v for k, v in converted_state_dict.items()}
     return converted_state_dict
+
 
 def _patch_missing_lora_alphas(state_dict):
     """Add missing alpha keys for LoRA entries that omit them."""
@@ -589,7 +604,7 @@ def _load_lora(pipeline, lora_path, adapter_name):
         )
         if not is_recoverable or not hasattr(pipeline, "load_lora_into_transformer"):
             raise
-        print(f"LoRA load failed; trying format conversion.")
+        print("LoRA load failed; trying format conversion.")
 
     # Attempt 2: normalize keys + patch missing alpha keys
     import tempfile
@@ -614,7 +629,7 @@ def _load_lora(pipeline, lora_path, adapter_name):
         pipeline.load_lora_weights(patched_path, adapter_name=adapter_name)
         return
     except Exception:
-        print(f"load_lora_weights (patched) failed; trying format conversion.")
+        print("load_lora_weights (patched) failed; trying format conversion.")
     finally:
         if patched_path:
             try:
@@ -625,12 +640,12 @@ def _load_lora(pipeline, lora_path, adapter_name):
     # Attempt 3: Manual key mapping conversion + direct injection.
     if not _needs_manual_key_mapping(state_dict):
         raise RuntimeError(f"LoRA '{adapter_name}' could not be loaded. Unknown format.")
-    print(f"Converting keys for Z-Image transformer.")
+    print("Converting keys for Z-Image transformer.")
     state_dict = _convert_lora_to_diffusers(state_dict)
-    
+
     # Force state_dict to bfloat16 to match the base model's dtype and avoid precision mismatch errors.
     state_dict = {k: v.to(dtype=torch.bfloat16) for k, v in state_dict.items()}
-    
+
     pipeline.load_lora_into_transformer(
         state_dict=state_dict,
         transformer=pipeline.transformer,
@@ -643,6 +658,7 @@ def _load_lora(pipeline, lora_path, adapter_name):
 def _activate_loras(pipeline, adapter_names, adapter_scales):
     """Activate one or more loaded LoRA adapters."""
     pipeline.set_adapters(adapter_names, adapter_weights=adapter_scales)
+
 
 def handler(job):
     """The main RunPod serverless handler."""
@@ -685,7 +701,7 @@ def handler(job):
             steps = 9 if is_turbo else 50
         else:
             steps = int(steps)
-            
+
         if guidance_scale is None:
             # Turbo models MUST use low CFG (often 0.0) to prevent collapse
             # 4.5 is the empirically tested sweet spot for Z-Image Base realism
@@ -695,20 +711,35 @@ def handler(job):
 
         seed = int(job_input.get("seed", 42))
 
-        # True is the official recommendation for photorealism (per Tongyi-MAI/Z-Image README)
+        # Official Tongyi-MAI/Z-Image README, "Recommended Parameters": "CFG
+        # normalization: False for general stylism, True for realism." This
+        # worker targets photorealistic output, so True is the correct default
+        # even though the README's own code sample happens to use False.
+        # https://github.com/Tongyi-MAI/Z-Image#-z-image (Recommended Parameters)
         cfg_normalization = _to_bool(job_input.get("cfg_normalization"), default=True)
         cfg_truncation = float(job_input.get("cfg_truncation", 1.0))
         max_sequence_length = int(job_input.get("max_sequence_length", 512))
 
         use_beta_sigmas = _resolve_use_beta_sigmas(job_input.get("use_beta_sigmas"))
 
-        # shift=1.0 is the Z-Image architecture/scheduler default and matches the official
-        # Tongyi-MAI recommended inference settings. Higher shift (e.g. 3.0) over-weights
-        # early composition steps and starves detail refinement, producing softer/underbaked output.
+        # When not explicitly requested, leave `shift` as None so
+        # _configure_scheduler's own fallback (pipeline.scheduler.config's
+        # already-loaded value) is used unchanged -- i.e. whatever shift the
+        # loaded checkpoint actually ships with, rather than a hardcoded
+        # literal that could silently drift from the checkpoint. Verified via
+        # the actual shipped scheduler_config.json on each model's HF repo
+        # (use_dynamic_shifting=false in both, so this is a static, calibrated
+        # value, not something the model derives at runtime): Z-Image (base)
+        # ships shift=6.0, Z-Image-Turbo ships shift=3.0. Neither the model's
+        # GitHub README nor its HF model card mentions `shift` at all, so the
+        # previous default of 1.0 (applied to both variants, and always passed
+        # explicitly -- overriding the checkpoint's own config on every
+        # request) was not grounded in any official source and diverged from
+        # both checkpoints' own calibrated schedule.
+        # https://huggingface.co/Tongyi-MAI/Z-Image/blob/main/scheduler/scheduler_config.json
+        # https://huggingface.co/Tongyi-MAI/Z-Image-Turbo/blob/main/scheduler/scheduler_config.json
         shift = job_input.get("shift")
-        if shift is None:
-            shift = 1.0
-        else:
+        if shift is not None:
             shift = float(shift)
 
         # Detail upscaler (ComfyUI-style "Upscale Image (using Model)"). The model is
@@ -734,7 +765,9 @@ def handler(job):
         second_pass_enabled = _to_bool(job_input.get("second_pass_enabled"), default=second_pass_enabled_default)
         second_pass_upscale = float(job_input.get("second_pass_upscale", 1.25))
         # 0.42 strength does enough work to clean the Z-Image Base "never fully denoised"
-        # artifact (confirmed in Tongyi-MAI/Z-Image issue #144) without losing composition.
+        # artifact (confirmed in Tongyi-MAI/Z-Image issue #144, which also documents the
+        # light-second-pass workaround this second_pass implements) without losing
+        # composition. https://github.com/Tongyi-MAI/Z-Image/issues/144
         second_pass_strength = float(job_input.get("second_pass_strength", 0.42))
         second_pass_steps = int(job_input.get("second_pass_steps", 28))
         second_pass_guidance_scale = float(job_input.get("second_pass_guidance_scale", 4.5))
@@ -747,11 +780,16 @@ def handler(job):
             second_pass_use_beta_sigmas = use_beta_sigmas
 
         vae_tiling_input = job_input.get("vae_tiling")
-        vae_tiling = _to_bool(vae_tiling_input, default=(width * height) > (1024 * 1024)) if vae_tiling_input is not None else (width * height) > (1024 * 1024)
+        vae_tiling_default = (width * height) > (1024 * 1024)
+        vae_tiling = (
+            _to_bool(vae_tiling_input, default=vae_tiling_default)
+            if vae_tiling_input is not None
+            else vae_tiling_default
+        )
 
         second_pass_vae_tiling = _to_bool(job_input.get("second_pass_vae_tiling"), default=False)
         second_pass_vae_slicing = _to_bool(job_input.get("second_pass_vae_slicing"), default=True)
-        
+
         request_id = str(uuid.uuid4())[:8]
 
         pipeline = get_pipeline()
@@ -765,18 +803,25 @@ def handler(job):
             pipeline.vae.enable_tiling()
         else:
             pipeline.vae.disable_tiling()
-        
+
         if img2img_pipeline is not None:
-            if second_pass_vae_tiling: img2img_pipeline.vae.enable_tiling()
-            else: img2img_pipeline.vae.disable_tiling()
-            if second_pass_vae_slicing: img2img_pipeline.vae.enable_slicing()
-            else: img2img_pipeline.vae.disable_slicing()
+            if second_pass_vae_tiling:
+                img2img_pipeline.vae.enable_tiling()
+            else:
+                img2img_pipeline.vae.disable_tiling()
+            if second_pass_vae_slicing:
+                img2img_pipeline.vae.enable_slicing()
+            else:
+                img2img_pipeline.vae.disable_slicing()
 
         pipeline.unload_lora_weights()
         if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
             img2img_pipeline.unload_lora_weights()
 
-        lora_entries = [{"url": lora["url"], "scale": lora["scale"], "name": f"adapter_{request_id}_{i}", "path": None} for i, lora in enumerate(lora_list)]
+        lora_entries = [
+            {"url": lora["url"], "scale": lora["scale"], "name": f"adapter_{request_id}_{i}", "path": None}
+            for i, lora in enumerate(lora_list)
+        ]
 
         if lora_entries:
             def _download(entry):
@@ -792,18 +837,18 @@ def handler(job):
 
             adapter_names = [e["name"] for e in lora_entries]
             adapter_weights = [e["scale"] for e in lora_entries]
-            
+
             # Re-enforce transformer dtype after LoRA injection to prevent precision mismatch errors.
             pipeline.transformer.to(dtype=torch.bfloat16)
             if img2img_pipeline is not None:
                 img2img_pipeline.transformer.to(dtype=torch.bfloat16)
-            
+
             _activate_loras(pipeline, adapter_names, adapter_weights)
             if img2img_pipeline is not None and img2img_pipeline.transformer is not pipeline.transformer:
                 _activate_loras(img2img_pipeline, adapter_names, adapter_weights)
 
         generator = torch.Generator("cuda").manual_seed(seed)
-        
+
         # Use autocast to handle mixed precision gracefully (Transformer in BF16, VAE in F32).
         with torch.autocast("cuda", dtype=torch.bfloat16):
             result = pipeline(
@@ -858,14 +903,17 @@ def handler(job):
         s3_url = upload_image_to_s3(output_path, output_filename)
 
         for entry in lora_entries:
-            if entry["path"] and os.path.exists(entry["path"]): os.remove(entry["path"])
-        if os.path.exists(output_path): os.remove(output_path)
+            if entry["path"] and os.path.exists(entry["path"]):
+                os.remove(entry["path"])
+        if os.path.exists(output_path):
+            os.remove(output_path)
 
         return {"image_url": s3_url}
 
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e)}
+
 
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
