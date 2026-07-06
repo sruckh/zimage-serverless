@@ -581,6 +581,63 @@ run on the LoRA-fix build:
     `https://raw.githubusercontent.com/huggingface/diffusers/main/src/diffusers/loaders/lora_conversion_utils.py`;
     `https://raw.githubusercontent.com/huggingface/diffusers/main/src/diffusers/loaders/lora_pipeline.py`.
 
+### 5. `second_pass_vae_tiling` default: hardcoded `False` → size-based auto (mirrors `vae_tiling`)
+
+- **Trigger**: live-tested a new LoRA (`malcolmrey/zbase_aaliyah_v1`, not
+  `TEST_LORA_URL`) and got a real, worker-log-confirmed
+  `torch.OutOfMemoryError` inside `vae.decode`'s upsampling `conv2d` during
+  the second-pass img2img step (`23.52 GiB` total capacity, `22.98 GiB`
+  already in use, `535.75 MiB` free, tried to allocate `800.00 MiB`).
+  `handler.py`'s existing graceful fallback caught it and returned the
+  un-refined single-pass upscaled image instead of failing the job — so the
+  job "succeeds" but silently loses the second-pass quality refinement this
+  pipeline exists to provide.
+- **Two independent contributing causes found, one config, one code**:
+  1. **Endpoint config drift, not a code bug**: the live worker log showed
+     `Upscaler 'nomos_webphoto' loaded: arch=PLKSR, scale=4, device=cuda,
+     half=False.` — but `handler.py`'s own `get_upscaler` defaults
+     `UPSCALE_USE_CUDA` to `False` (confirmed in this log's own README
+     cross-check above), and project memory documents keeping the upscaler
+     on CPU specifically to reserve VRAM for diffusion passes. This means
+     `UPSCALE_USE_CUDA=true` is set as an environment-variable override on
+     the live endpoint itself, keeping a `half=False` (float32; this
+     architecture doesn't support fp16) upscaler model permanently resident
+     on GPU for the whole job — and, since it's cached in a
+     process-lifetime global dict, across every warm-started job on that
+     worker. User confirmed switching this back to the documented CPU
+     default directly on the RunPod endpoint (not a code change, so not
+     reflected in `git diff`).
+  2. **Code bug**: `second_pass_vae_tiling` defaulted to a hardcoded `False`
+     regardless of size, while the *base*-pass `vae_tiling` (a few lines
+     above it) already auto-enables based on
+     `(width * height) > (1024 * 1024)`. The second-pass image is the
+     *upscaled* result (`second_pass_upscale`, default `1.25×`), so it is
+     systematically **larger** than the base-pass dimensions that trigger
+     auto-tiling — yet it got no equivalent protection at all. The
+     production traceback shows the OOM happening in exactly the operation
+     VAE tiling exists to shrink: `vae.decode` → `up_block` →
+     `upsampler.conv` → `F.conv2d`.
+- **Source**: official diffusers memory-optimization docs (via context7,
+  `/huggingface/diffusers`, `docs/source/en/optimization/memory.md`): *"VAE
+  tiling divides an image into smaller, overlapping tiles to reduce peak
+  memory usage during decoding... The generated image may have some tone
+  variation from tile-to-tile because they're decoded separately, but there
+  shouldn't be any obvious seams between the tiles."* This directly
+  contradicts the pre-existing (uncited, unverified — not present anywhere
+  else in this log) README claim being replaced here: *"tiling causes
+  visible seams at second-pass image sizes."*
+- **Fixed**: computed `second_pass_width`/`second_pass_height` from
+  `width`/`height` × `second_pass_upscale`, and used
+  `(second_pass_width * second_pass_height) > (1024 * 1024)` as
+  `second_pass_vae_tiling`'s default — same threshold and logic as the base
+  pass, applied to the pass's actual decode resolution instead of a
+  hardcoded `False`. Still fully overridable via `second_pass_vae_tiling` in
+  the job input, same as before. Updated the README row to describe the new
+  auto default and removed the uncited seam claim. Not yet re-verified with
+  a live test at a resolution large enough to trigger tiling as of this
+  entry (pending redeploy + a request sized to exceed the 1024×1024
+  post-upscale threshold).
+
 ## Not changed, and why
 
 - `guidance_scale` (Base default `4.5`) and `steps` (Base default `50`) both

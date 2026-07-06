@@ -878,7 +878,23 @@ def handler(job):
             else vae_tiling_default
         )
 
-        second_pass_vae_tiling = _to_bool(job_input.get("second_pass_vae_tiling"), default=False)
+        # Second-pass image is the *upscaled* result (second_pass_upscale, default
+        # 1.25x), so it's systematically larger than the base-pass width/height that
+        # `vae_tiling_default` above checks -- yet this used a hardcoded `False`
+        # regardless of that larger size, unlike the base pass's own size-based
+        # auto-tiling above. VAE tiling "divides an image into smaller, overlapping
+        # tiles to reduce peak memory usage during decoding" (official diffusers
+        # memory-optimization guide), which is exactly the operation observed to
+        # OOM in production: `vae.decode`'s upsampling conv2d, with the transformer
+        # and LoRA weights still resident in VRAM at that point. Mirrors the base
+        # pass's same size threshold, applied to the actual post-upscale resolution.
+        # https://github.com/huggingface/diffusers/blob/main/docs/source/en/optimization/memory.md
+        second_pass_width = int(round(width * second_pass_upscale))
+        second_pass_height = int(round(height * second_pass_upscale))
+        second_pass_vae_tiling_default = (second_pass_width * second_pass_height) > (1024 * 1024)
+        second_pass_vae_tiling = _to_bool(
+            job_input.get("second_pass_vae_tiling"), default=second_pass_vae_tiling_default
+        )
         second_pass_vae_slicing = _to_bool(job_input.get("second_pass_vae_slicing"), default=True)
 
         request_id = str(uuid.uuid4())[:8]

@@ -105,7 +105,7 @@ This is the **default** finishing path. The base output is upscaled with the sel
 | `second_pass_cfg_truncation` | Float | No | `1.0` | CFG truncation for pass 2. |
 | `second_pass_max_sequence_length` | Integer | No | `max_sequence_length` | Token limit for pass-2 prompt. Defaults to the base pass's resolved value (`512` unless `max_sequence_length` was itself overridden). |
 | `second_pass_use_beta_sigmas` | Boolean | No | `use_beta_sigmas` | Beta-sigma toggle for pass-2 scheduler. Defaults to the base pass value. |
-| `second_pass_vae_tiling` | Boolean | No | `false` | VAE tiling for pass 2. Disabled by default — tiling causes visible seams at second-pass image sizes. Use slicing instead. |
+| `second_pass_vae_tiling` | Boolean | No | auto | Override adaptive VAE tiling for pass 2 (`auto`: enabled only when the *upscaled* pass-2 output exceeds 1024×1024, mirroring `vae_tiling` above but sized to the post-upscale resolution). |
 | `second_pass_vae_slicing` | Boolean | No | `true` | VAE slicing for pass 2. Enabled by default for VRAM headroom. |
 
 ### Available Upscalers
